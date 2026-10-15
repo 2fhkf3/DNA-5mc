@@ -30,7 +30,7 @@ strategies:
   - center_5mer_emb8_none
 seeds: [1,2,3]       # Alternatively: seed: 1
 device: auto          # auto, cpu, cuda:0, cuda:1
-devices: [cuda:0, cuda:1]
+devices: [cuda:0]
 # Fusion keeps the signal branch; the base branch is only nn.Embedding(...,8).
 # It uses no mean/std/signal-count statistics or extra statistics TSV.
 base_source: ref        # TSV ref column; use seq to select the TSV seq column
@@ -50,7 +50,7 @@ training:
   gpu_cache_fallback: true         # 显存不足/非 CUDA 时回退；false 则直接报错
 
   epochs: 80
-  patience: 6
+  patience: 80
   batch_size: 2048
   eval_batch_size: 2048
   lr: 0.0001
@@ -86,6 +86,6 @@ model:
 # Optional training overrides keyed by strategy; model structures are above.
 strategy_overrides:
   center_5mer_emb8_none:
-    batch_size: 256
-    eval_batch_size: 256
+    batch_size: 512
+    eval_batch_size: 512
     grad_clip: 0.5
