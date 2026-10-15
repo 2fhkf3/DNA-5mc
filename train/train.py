@@ -38,6 +38,7 @@ from torch.utils.data import DataLoader, Dataset, default_collate
 
 from model import FUSION_STRATEGY, STRATEGIES, build_model
 import wandb_tracking as tracking
+import gpu_feature_cache as feature_caching
 
 ROOT = Path(__file__).resolve().parent
 SPLITS = ("train", "valid", "test")
@@ -59,6 +60,7 @@ DEFAULTS = {
         "log_every_steps": 50,
         "batch_read": True, "eval_num_workers": 0,
         "prefetch_factor": 2, "persistent_workers": True,
+        **feature_caching.DEFAULTS,
     },
     "model": {
         "gaussian_sigma": 1.0, "mlp_hidden_dims": [512, 128],
@@ -94,6 +96,7 @@ def positive_integer(value, name, minimum=1):
 
 
 def validate_training(settings):
+    feature_caching.validate_settings(settings)
     for key in ("epochs", "patience", "batch_size", "eval_batch_size", "cpu_threads"):
         positive_integer(settings[key], key)
     positive_integer(settings["num_workers"], "num_workers", 0)
@@ -146,7 +149,8 @@ def load_config(path, args=None):
         if getattr(args, "log_every_steps", None) is not None:
             for override in cfg["strategy_overrides"].values():
                 override["log_every_steps"] = args.log_every_steps
-        for key in ("num_workers", "eval_num_workers", "prefetch_factor", "batch_read", "persistent_workers"):
+        for key in ("num_workers", "eval_num_workers", "prefetch_factor", "batch_read", "persistent_workers",
+                    *feature_caching.DEFAULTS):
             if getattr(args, key, None) is not None:
                 cfg["training"][key] = getattr(args, key)
                 for override in cfg["strategy_overrides"].values():
@@ -454,7 +458,9 @@ class FeatureDataLoader(DataLoader):
         return super().__iter__()
 
 
-def loader(dataset, training, batch_size, shuffle, device, generator=None):
+def loader(dataset, training, batch_size, shuffle, device, generator=None, cached=None):
+    if cached is not None:
+        return feature_caching.GPUCachedLoader(dataset, cached, batch_size, shuffle, generator)
     workers = training["num_workers"] if shuffle else training.get("eval_num_workers", 0)
     options = {}
     if workers:
@@ -499,7 +505,7 @@ def predict(model, dataset, training, fusion, device, data_loader=None):
     for x, bases, y in data_loader:
         loss, p = batch_forward(model, x, bases, y, fusion, device)
         total_loss += float(loss.item()) * len(y)
-        labels.append(y.numpy()); probs.append(p.cpu().numpy())
+        labels.append(y.cpu().numpy()); probs.append(p.cpu().numpy())
     return np.concatenate(labels), np.concatenate(probs), total_loss / len(dataset)
 
 
@@ -591,8 +597,9 @@ def code_hashes():
     numerical = "".join(ast.dump(n, include_attributes=False) for n in tree.body
                         if getattr(n, "name", None) in TRAINING_DEFINITIONS).encode()
     base_codes = json.dumps(BASE_TO_CODE, sort_keys=True).encode()
-    return dict(source=hashlib.sha256(source + models + Path(tracking.__file__).read_bytes()).hexdigest(),
-                training=hashlib.sha256(numerical + models + base_codes).hexdigest())
+    cache_code = Path(feature_caching.__file__).read_bytes()
+    return dict(source=hashlib.sha256(source + models + Path(tracking.__file__).read_bytes() + cache_code).hexdigest(),
+                training=hashlib.sha256(numerical + models + base_codes + cache_code).hexdigest())
 
 
 def run_configuration(cfg, strategy, seed, splits, device, hashes):
@@ -632,7 +639,7 @@ def run_directory(cfg, strategy, seed):
     return Path(cfg["output_dir"]) / cfg["experiment"] / "runs" / f"{strategy}_seed{seed}"
 
 
-def train_run(cfg, strategy, seed, splits, device, hashes):
+def train_run(cfg, strategy, seed, splits, device, hashes, feature_cache=None):
     training, run_config, fingerprint = run_configuration(cfg, strategy, seed, splits, device, hashes)
     run_dir = run_directory(cfg, strategy, seed)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -649,10 +656,16 @@ def train_run(cfg, strategy, seed, splits, device, hashes):
         with (run_dir / "train.log").open("w", encoding="utf-8") as log:
             with contextlib.redirect_stdout(Tee(sys.stdout, log)):
                 with tracking.track_run(cfg, run_config, run_dir):
-                    return fit(cfg, strategy, seed, splits, device, training, run_config, fingerprint, run_dir)
+                    return fit(cfg, strategy, seed, splits, device, training, run_config, fingerprint, run_dir,
+                               feature_cache)
 
 
-def fit(cfg, strategy, seed, splits, device, training, run_config, fingerprint, run_dir):
+def fit(cfg, strategy, seed, splits, device, training, run_config, fingerprint, run_dir, feature_cache=None):
+    # Also support callers that run one task directly rather than the scheduler.
+    if feature_cache is None:
+        with feature_caching.GPUFeatureCache(device) as owned_cache:
+            return fit(cfg, strategy, seed, splits, device, training, run_config, fingerprint, run_dir,
+                       owned_cache)
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -668,22 +681,28 @@ def fit(cfg, strategy, seed, splits, device, training, run_config, fingerprint, 
                                  batch_read=training["batch_read"]) for s, d in splits.items()}
     model = build_model(strategy, hidden_dim, window, cfg["model"]).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=training["lr"], weight_decay=training["weight_decay"])
+    cached_splits, cache_info = feature_cache.prepare(splits, training)
     generator = torch.Generator().manual_seed(seed)
-    train_loader = loader(datasets["train"], training, training["batch_size"], True, device, generator)
-    eval_loaders = {"valid": loader(datasets["valid"], training, training["eval_batch_size"], False, device)}
+    train_loader = loader(datasets["train"], training, training["batch_size"], True, device, generator,
+                          cached=cached_splits.get("train"))
+    eval_loaders = {"valid": loader(datasets["valid"], training, training["eval_batch_size"], False, device,
+                                   cached=cached_splits.get("valid"))}
     run_config.update(fingerprint=fingerprint, source_window_size=window, hidden_dim=hidden_dim,
                       model_window_size=cfg["fusion_window_size"] if fusion else (1 if strategy == STRATEGIES[0] else 5),
                       base_embedding_dim=8 if fusion else None,
                       loss="cross_entropy" if fusion else "binary_cross_entropy_with_logits",
-                      trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad))
+                      trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad),
+                      gpu_cache=cache_info)
     json_write(run_dir / "config.json", run_config)
     (run_dir / "resolved_config.yaml").write_text(yaml.safe_dump(run_config, sort_keys=False))
     tracking.update_config(run_config)
     print(f"[RUN] {strategy} seed={seed} device={device} parameters={run_config['trainable_parameters']}", flush=True)
-    print(f"[DATA] batch_read={training['batch_read']} workers={training['num_workers']} "
+    train_workers = 0 if "train" in cached_splits else training["num_workers"]
+    print(f"[DATA] batch_read={training['batch_read']} workers={train_workers} "
           f"eval_workers={training['eval_num_workers']} "
-          f"prefetch_factor={training['prefetch_factor'] if training['num_workers'] else 0} "
-          f"persistent_workers={bool(training['num_workers'] and training['persistent_workers'])}", flush=True)
+          f"prefetch_factor={training['prefetch_factor'] if train_workers else 0} "
+          f"persistent_workers={bool(train_workers and training['persistent_workers'])} "
+          f"gpu_cache_splits={list(cached_splits)}", flush=True)
     history = []; best_score = -math.inf; best_epoch = 0; stale = 0
     monitor_metric = training["monitor_metric"]
     best_path = run_dir / "best.pt"
@@ -765,7 +784,8 @@ def fit(cfg, strategy, seed, splits, device, training, run_config, fingerprint, 
                    history=history)
     for name in (("train", "valid", "test") if cfg["evaluate_train"] else ("valid", "test")):
         if name not in eval_loaders:
-            eval_loaders[name] = loader(datasets[name], training, training["eval_batch_size"], False, device)
+            eval_loaders[name] = loader(datasets[name], training, training["eval_batch_size"], False, device,
+                                        cached=cached_splits.get(name))
         labels, probs, loss = predict(model, datasets[name], training, fusion, device,
                                      data_loader=eval_loaders[name])
         metrics[f"{name}_read_level"] = dict(binary_metrics(labels, probs, training["threshold"]), loss=loss)
@@ -867,15 +887,16 @@ def gpu_worker(worker_id, device_name_, cfg, jobs, events, hashes, input_signatu
         splits, _ = load_splits(cfg)
         if {s: d.input_signature for s, d in splits.items()} != input_signature:
             raise ValueError("Input files changed while starting workers")
-        while True:
-            job = jobs.get()
-            if job is None:
-                break
-            index, strategy, seed = job
-            events.put(("start", worker_id, index, device_name_))
-            train_run(cfg, strategy, seed, splits, device, hashes)
-            # metrics/history stay on disk; only a small status crosses IPC.
-            events.put(("done", worker_id, index, device_name_))
+        with feature_caching.GPUFeatureCache(device) as feature_cache:
+            while True:
+                job = jobs.get()
+                if job is None:
+                    break
+                index, strategy, seed = job
+                events.put(("start", worker_id, index, device_name_))
+                train_run(cfg, strategy, seed, splits, device, hashes, feature_cache)
+                # metrics/history stay on disk; only a small status crosses IPC.
+                events.put(("done", worker_id, index, device_name_))
         events.put(("exit", worker_id, None, device_name_))
     except BaseException:
         events.put(("error", worker_id, job[0] if job is not None else None, traceback.format_exc()))
@@ -971,12 +992,13 @@ def execute_runs(cfg, splits, devices, hashes, experiment_dir):
             gc.collect()
             parallel_runs(cfg, pending, devices, hashes, input_signature, results, state, experiment_dir)
         else:
-            for index, strategy, seed in pending:
-                state["tasks"][index].update(status="running", device=str(devices[0]), worker=0)
-                json_write(experiment_dir / "scheduling.json", state)
-                results[index] = train_run(cfg, strategy, seed, splits, devices[0], hashes)
-                state["tasks"][index]["status"] = "completed"
-                summarize([results[i] for i in sorted(results)], experiment_dir)
+            with feature_caching.GPUFeatureCache(devices[0]) as feature_cache:
+                for index, strategy, seed in pending:
+                    state["tasks"][index].update(status="running", device=str(devices[0]), worker=0)
+                    json_write(experiment_dir / "scheduling.json", state)
+                    results[index] = train_run(cfg, strategy, seed, splits, devices[0], hashes, feature_cache)
+                    state["tasks"][index]["status"] = "completed"
+                    summarize([results[i] for i in sorted(results)], experiment_dir)
         state["status"] = "completed"
         summarize([results[i] for i in sorted(results)], experiment_dir)
     except BaseException:
@@ -1004,6 +1026,15 @@ def main():
                         help="Read/convert complete batches (default: enabled)")
     parser.add_argument("--persistent-workers", action=argparse.BooleanOptionalAction, default=None,
                         help="Keep nonzero DataLoader workers alive between epochs (default: enabled)")
+    parser.add_argument("--gpu-cache", action=argparse.BooleanOptionalAction, default=None,
+                        help="Cache selected feature splits on each training GPU (default: disabled)")
+    parser.add_argument("--gpu-cache-splits", nargs="+", choices=SPLITS,
+                        help="Splits to cache together; default: train valid")
+    parser.add_argument("--gpu-cache-max-gib", type=float, help="Maximum cache GiB per training process")
+    parser.add_argument("--gpu-cache-reserve-gib", type=float, help="Keep this many GiB for training/other allocations")
+    parser.add_argument("--gpu-cache-chunk-size", type=int, help="Rows copied per bounded CPU-to-GPU chunk")
+    parser.add_argument("--gpu-cache-fallback", action=argparse.BooleanOptionalAction, default=None,
+                        help="Fall back to original loaders if cache cannot fit; disable for a strict error")
     parser.add_argument("--log-every-steps", type=int,
                         help="Log training progress every N batches, plus first/last batch (default: 50; 0 disables step logs)")
     device_options = parser.add_mutually_exclusive_group()
@@ -1034,6 +1065,7 @@ def run_main(cfg, dry_run, experiment_dir):
                       "parallelism": "independent strategy/seed experiments",
                       "tasks": len(cfg["strategies"]) * len(cfg["seeds"]),
                       "strategies": cfg["strategies"], "seeds": cfg["seeds"],
+                      "gpu_cache": {k: cfg['training'][k] for k in feature_caching.DEFAULTS},
                       "output": str(Path(cfg["output_dir"]) / cfg["experiment"])}, indent=2), flush=True)
     if dry_run:
         return

@@ -41,6 +41,14 @@ evaluate_train: false    # Final evaluation always includes valid and test
 save_predictions: test   # none, test, all (train is evaluated only if enabled)
 
 training:
+  # 可选 GPU 特征缓存：默认关闭；按 GPU 工作进程复用，保留源特征精度。
+  gpu_cache: false
+  gpu_cache_splits: [train, valid]  # 未缓存的 split 继续使用原有读取方式
+  gpu_cache_max_gib: 40.0          # 每个工作进程的缓存总上限（GiB）
+  gpu_cache_reserve_gib: 4.0       # 加载后为训练等额外开销预留的显存（GiB）
+  gpu_cache_chunk_size: 8192       # 每块加载的样本数，避免整份数据占用 CPU 内存
+  gpu_cache_fallback: true         # 显存不足/非 CUDA 时回退；false 则直接报错
+
   epochs: 80
   patience: 6
   batch_size: 2048

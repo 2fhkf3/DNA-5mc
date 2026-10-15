@@ -88,13 +88,15 @@ export PYTHON_BIN="$(command -v python)"
 
 | 环境变量 | 默认值 / 行为 |
 | --- | --- |
-| `PYTHON_BIN` | 显式指定优先；否则使用已激活 Conda 环境，再尝试原服务器的 PoreDLM 环境，最后使用 `python3` |
+| `PYTHON_BIN` | 显式指定优先；否则使用已激活的非 base Conda 环境，再尝试服务器已有的 PoreDLM 环境；均不可用时使用当前 Conda Python 或 `python3` |
 | `BACKBONE_ROOT` | `项目根目录/train/backbone` |
 | `OUTPUT_ROOT` | `项目根目录/output`，影响工作流的默认输入输出路径 |
 | `HF_MODULES_CACHE` | `OUTPUT_ROOT/.hf_modules` |
 | `DRY_RUN=1` | Bash 入口只显示解析后的路径和命令，不开始处理或训练 |
 
 **训练 YAML 的相对路径始终以 `train/` 为基准**，与 YAML 自身位置、启动目录无关。例如 `feature_dir: data/V543-V2` 指向 `train/data/V543-V2`；`output_dir: output` 指向 `train/output`。修改 `OUTPUT_ROOT` 不会自动修改 YAML。
+
+若启动时报 `No module named 'numpy'` 或 `No module named 'torch'`，应检查实际使用的 Python。当前服务器的 `base` 环境缺少训练依赖，Bash 入口在 `base` 下优先使用已有 PoreDLM；手动设置 `PYTHON_BIN` 时，请确保对应环境包含这些依赖。
 
 ## 3. 准备预训练模型
 

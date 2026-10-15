@@ -109,6 +109,35 @@ save_predictions: test
 
 # 所有分类头共用的训练参数；strategy_overrides 可针对指定分类头覆盖其中的字段。
 training:
+  # 是否将指定 split 的完整特征缓存到当前训练 GPU，默认 false。
+  # true 时先分块加载，随后按原有 CPU 采样顺序在 GPU 取 batch，并转 float32 计算。
+  # 缓存保留原文件 dtype；FP16 不额外量化，FP32 也不会压缩为 FP16。
+  # 同一 GPU 工作进程内的分类头/seed 复用缓存；不同进程各占一份显存。
+  gpu_cache: false
+
+  # 一起缓存的 split，可选 train、valid、test；默认训练集和验证集。
+  # 未列入的 split 继续使用原 DataLoader；选中但总量放不下时整体回退。
+  # 缓存 split 不再启动 DataLoader worker，也不使用其预取和 pin_memory 队列。
+  gpu_cache_splits: [train, valid]
+
+  # 单个 GPU 工作进程的缓存上限，包含完整窗口特征、标签及可选碱基编码。
+  # 必须 >0；例如 5-mer 的 train+valid 约 36.4 GiB，可先设置 40。
+  # 输入仍为 15-mer 时按完整 15-mer 估算，不会自动裁剪为 5-mer。
+  gpu_cache_max_gib: 40.0
+
+  # 加载缓存时额外预留的显存（GiB，>=0），供模型、优化器及激活等使用。
+  # 这是加载时的容量检查；其他进程后续增加显存占用仍可能影响训练。
+  gpu_cache_reserve_gib: 4.0
+
+  # 每次从源文件读取并传入 GPU 的样本数，>=1；不改变训练 batch_size。
+  # 8192 个 5×768 FP16 样本约 120 MiB；CPU 中只暂存当前块。
+  gpu_cache_chunk_size: 8192
+
+  # true：超过上限、显存不足、加载时 CUDA OOM 或使用 CPU 时打印原因并回退。
+  # false：上述情况直接报错，适合确认实验确实启用了缓存。
+  # 仅处理缓存加载；训练阶段自身的 OOM 会正常报错。
+  gpu_cache_fallback: true
+
   # 最大训练轮数；达到早停条件时可能提前结束。
   epochs: 80
 
