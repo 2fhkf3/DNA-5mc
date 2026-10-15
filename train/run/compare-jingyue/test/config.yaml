@@ -1,0 +1,67 @@
+# Run from DNA-5mC/train/: bash run/compare-jingyue/test/run.sh
+# All relative paths below are resolved against DNA-5mC/train/.
+# Feature paths are relative to train/; choose the model-specific Step4/Step5 output.
+feature_dir: ../output/step4_output/smoke-test/V011_cls65000_ode097
+# Read metadata_train.tsv, metadata_valid.tsv and metadata_test.tsv from this
+# directory. null follows feature_dir automatically; a separate path is optional.
+metadata_dir: null
+output_dir: output
+experiment: smoke-v011
+
+# Use one or more of the seven strategies. To run just one, replace this list
+# with, for example: strategy: center_5mer_emb8_none
+strategies:
+  # - center_base_linear_raw768
+  - center_5mer_linear_raw768
+  # - center_5mer_gaussian_pool_linear_raw768
+  # - center_5mer_learned_pool_linear_raw768
+  - center_5mer_mlp_raw768
+  - center_5mer_residual_dwconv_raw768
+  - center_5mer_emb8_none
+seeds: [3]       # Alternatively: seed: 1
+device: auto           # auto, cpu, cuda:0, cuda:1
+
+# Fusion keeps the signal branch; the base branch is only nn.Embedding(...,8).
+# It uses no mean/std/signal-count statistics or extra statistics TSV.
+base_source: ref        # TSV ref column; use seq to select the TSV seq column
+fusion_window_size: 5   # Center-crop to 5 positions, matching the original launcher
+check_site_overlap: true  # Check chromosome + coordinate across all three splits
+skip_completed: true     # Skip only when config, input signatures and code match
+evaluate_train: false    # Final evaluation always includes valid and test
+save_predictions: test   # none, test, all (train is evaluated only if enabled)
+
+training:
+  epochs: 80
+  patience: 12
+  batch_size: 2048
+  eval_batch_size: 2048
+  lr: 0.0001
+  weight_decay: 0.0001
+  grad_clip: 0.0
+  monitor_metric: auroc   # auroc, auprc, f1, accuracy, loss; uses valid only
+  threshold: 0.5
+  num_workers: 0
+  cpu_threads: 4
+  deterministic: true
+
+model:
+  gaussian_sigma: 1.0
+  mlp_hidden_dims: [512, 128]
+  conv_channels: 128
+  conv_head_dim: 128
+  dropout: 0.2
+  deepplant:
+    signal_mlp_hidden: 256
+    signal_mlp_dropout: 0.1
+    base_hidden: 128
+    fusion_hidden: 256
+    base_layers: 2
+    fusion_layers: 3
+    dropout: 0.5
+
+# Optional training overrides keyed by strategy; model structures are above.
+strategy_overrides:
+  center_5mer_emb8_none:
+    batch_size: 256
+    eval_batch_size: 256
+    grad_clip: 0.5

@@ -1,0 +1,236 @@
+# 启动示例：在 DNA-5mC/train/ 目录下执行 bash run/example/run.sh。
+# 配置中的相对路径以 train.py 所在目录 DNA-5mC/train/ 为基准，
+# 不以本 YAML 所在目录或启动命令的当前目录为基准。
+# 已显式列出批量读取相关参数：batch_read、num_workers、eval_num_workers、
+# prefetch_factor、persistent_workers；省略时也会使用 train.py 中的默认值。
+# 下方保留通用示例值；按本机数据读取速度比较 num_workers=0、2、4 后再选择。
+
+# 输入特征目录：包含 train.pt、valid.pt、test.pt；使用内存映射格式时，
+# 还需包含各 .pt 清单指定的特征和标签二进制文件。
+# 输入特征路径以 train.py 所在的 train/ 目录为基准；换特征版本时也应更换 experiment。
+feature_dir: ../output/step4_output/V554
+
+# 元数据目录：包含 metadata_train.tsv、metadata_valid.tsv、metadata_test.tsv。
+# null 表示与 feature_dir 相同，也可以填写独立目录。
+metadata_dir: null
+
+# 结果输出根目录；这里的 output 对应 DNA-5mC/train/output/。
+output_dir: output
+
+# 实验名称：结果保存到 output_dir/experiment/，各分类头和 seed 分别建立运行目录。
+# 这里保留当前示例值；开始独立新实验时可更换名称，避免与已有运行目录冲突。
+experiment: V554
+
+# W&B 实验记录；默认关闭，改为 true 后按“分类头 + seed”分别创建 run。
+# 与 continuous_bert 使用相同的 enabled/project/entity/name 配置方式。
+wandb:
+  # 是否启用；false 时不导入 W&B SDK，不需要安装或登录。
+  enabled: false
+  # W&B 项目名称；各模型可共用项目，通过 experiment 分组比较。
+  project: "DNA-5mc-classifier"
+  # W&B 用户或团队空间，沿用 continuous_bert 的配置；null 使用登录账号的默认空间。
+  entity: "shenhaojie223-hangzhpu"
+  # run 名称前缀；null 使用 experiment，最终名称为“前缀/分类头_seedN”。
+  name: null
+  # run 分组；null 使用 experiment，便于将同一实验的各分类头/seed 放在一起。
+  group: null
+  # online 在线记录；offline 仅保存本地日志，之后可 wandb sync；disabled 不记录。
+  # 环境变量 WANDB_MODE 的优先级高于此项，例如 WANDB_MODE=offline bash run/example/run.sh。
+  mode: online
+  # 可选标签列表，例如 [V543, center5]；不填标签时使用 []。
+  tags: []
+# 训练曲线沿用 training.log_every_steps 的间隔；设为 0 时仅记录每轮验证和最终指标。
+# 每轮记录验证 loss/AUROC 等，最终记录 read/site 指标、最佳轮次、实际训练轮数和早停状态。
+# 本地 W&B 文件保存到各运行目录的 wandb/，run ID/链接见 wandb_run.json。
+# 已完成且兼容的实验仍直接跳过，不会因启用 W&B 自动重训或补传历史结果。
+
+# 待训练的分类头列表：每个启用的分类头都会与下方每个 seed 组合执行一次。
+# 行首带 # 的策略未启用；也可用 strategy: 单个策略名 替代整个 strategies 列表，二者不能同时出现。
+# 策略名中的 raw768 表示原设计采用 768 维输入，实际输入维度由特征文件读取。
+strategies:
+  # 仅提取中心一个位置的特征，经 LayerNorm 后使用线性分类器。
+  # - center_base_linear_raw768
+
+  # 提取中心连续 5 个位置的特征，逐位置归一化后拼接，使用线性分类器。
+  - center_5mer_linear_raw768
+
+  # 对中心 5 个位置做固定高斯加权池化，再使用线性分类器；权重由 gaussian_sigma 决定。
+  - center_5mer_gaussian_pool_linear_raw768
+
+  # 对中心 5 个位置做可学习的加权池化，再使用线性分类器。
+  - center_5mer_learned_pool_linear_raw768
+
+  # 将中心 5 个位置的特征归一化、拼接，送入两层隐藏层的 MLP 分类头。
+  - center_5mer_mlp_raw768
+
+  # 中心 5 个位置经通道投影、两个残差深度可分离卷积块后进行分类。
+  - center_5mer_residual_dwconv_raw768
+
+  # 信号特征与碱基序列融合分类头：信号 MLP + 碱基 BiLSTM + 融合 BiLSTM。
+  # 碱基嵌入固定为 8 维；不额外使用均值、标准差、信号数等统计特征。
+  - center_5mer_emb8_none
+
+# 随机种子列表：控制模型初始化、数据打乱等随机过程；当前 6 种分类头 × 3 个种子 = 18 次运行。
+# 单个种子也可写为 seed: 1，但不能与 seeds 同时出现。
+seeds: [1,2,3]
+
+# 单设备模式下的设备：auto 自动选择可用的 cuda:0，否则使用 CPU；也可写 cpu、cuda:0 等。
+# 下方 devices 非 null 时优先使用 devices，此项不再决定实际分配的设备。
+device: auto
+
+# 并行运行设备列表：每张 GPU 启动一个工作进程，分别训练独立的分类头/seed 任务。
+# 这不是将同一个模型分到多卡训练；batch_size 是每个独立任务的大小，不随卡数相乘。
+# 设为 null 时使用上方 device；列表中需使用明确的设备编号，不能写 auto。
+devices: [cuda:0, cuda:1]
+
+# 融合头碱基分支读取的元数据列：ref 使用 ref 列，seq 使用 seq 列。
+# 仅融合头使用碱基序列；其他分类头仅使用输入特征。
+base_source: ref
+
+# 融合头使用的中心窗口长度：同时裁剪信号特征和碱基序列；必须为正奇数且不超过输入窗口。
+# 其他分类头的中心 1 个或 5 个位置由各自结构固定，不受此参数控制。
+fusion_window_size: 5
+
+# 是否检查训练/验证/测试集之间的位点重叠；按 chrom + center_genome_pos0 判定。
+# true 时发现重叠即报错；此检查不区分链方向或 source。
+check_site_overlap: true
+
+# 是否跳过已完成且配置、输入文件签名、相关代码指纹兼容的运行。
+# 不提供中断续训；false 也不会覆盖已有结果，遇到已有结果会要求更换实验名称。
+skip_completed: true
+
+# 训练结束后，是否用最佳模型额外评估训练集；验证集和测试集始终进行最终评估。
+# false 仅关闭最终训练集评估，不影响每轮训练 loss 的计算和输出。
+evaluate_train: false
+
+# 保存逐 read 和聚合位点预测结果的范围：none 不保存，test 仅保存测试集，all 保存所有已评估集合。
+# all 是否包含训练集取决于 evaluate_train；此项不影响 metrics.json 等指标文件的保存。
+save_predictions: test
+
+# 所有分类头共用的训练参数；strategy_overrides 可针对指定分类头覆盖其中的字段。
+training:
+  # 最大训练轮数；达到早停条件时可能提前结束。
+  epochs: 80
+
+  # 验证集监控指标连续多少轮没有严格改善时早停；相同指标值也计为未改善。
+  patience: 12
+
+  # 每次参数更新使用的样本数；最后一个 batch 可以小于此值。
+  batch_size: 2048
+
+  # 验证及最终评估时每个 batch 的样本数；不进行反向传播，可与训练 batch 分开设置。
+  eval_batch_size: 2048
+
+  # AdamW 优化器的学习率；当前代码没有学习率调度器，训练过程中保持此值。
+  lr: 0.0001
+
+  # AdamW 的权重衰减系数，用于正则化；0 表示不进行权重衰减。
+  weight_decay: 0.0001
+
+  # 梯度全局 L2 范数的裁剪上限；0 表示不裁剪，正数表示反向传播后、更新参数前进行裁剪。
+  grad_clip: 0.0
+
+  # 选择最佳模型及早停时监控的验证集 read-level 指标：auroc、auprc、f1、accuracy 或 loss。
+  # loss 越低越好，其他指标越高越好；指标不可计算时回退到验证 loss，不使用测试集选模型。
+  monitor_metric: auroc
+
+  # 二分类概率阈值：预测概率 >= 此值判为类别 1；影响 accuracy、precision、recall、F1 等阈值指标。
+  # read-level 和 site-level 使用同一阈值；AUROC、AUPRC 基于连续概率，不受此阈值影响。
+  threshold: 0.5
+
+  # 每个 GPU 训练任务的 DataLoader 子进程数；默认 0，由训练主进程读取数据，无后台预取。
+  # 2 张 GPU 同时各运行一个任务时，设置 2 就共启动 4 个训练数据加载子进程。
+  # 本地数据首次随机读取可先试 2，再比较 4；缓存命中时 0 也可能更快，并非越大越快。
+  num_workers: 0
+
+  # 是否整批读取和转换特征，默认 true；num_workers=0 时同样生效。
+  # 随机 batch 按文件偏移读取后恢复采样顺序；连续 batch 使用切片，不改变特征/标签对应关系。
+  # false 使用原先逐样本读取、再拼接成 batch 的方式，可用于速度和结果对照。
+  # 此项不改变 batch_size、模型结构或精度，送入模型的特征仍为 float32。
+  batch_read: true
+
+  # 验证及最终评估（包括可选的训练集评估）的 DataLoader 子进程数，默认 0。
+  # 与 num_workers 独立，0 表示评估时由训练主进程读取数据。
+  # 大于 0 时会额外启动评估子进程；启用常驻 worker 后可能与训练 worker 同时驻留。
+  eval_num_workers: 0
+
+  # 每个数据加载 worker 的预取批次数，默认 2，必须为 >=1 的整数。
+  # 对训练和评估均生效；对应 worker 数为 0 时忽略，不会创建后台预取队列。
+  # 例如 num_workers=2、prefetch_factor=2，训练端每个 GPU 任务最多预取约 4 批。
+  # 增大此值会增加缓冲内存，不一定提速；通常先比较 1 和 2。
+  prefetch_factor: 2
+
+  # 是否跨 epoch 复用数据加载子进程，默认 true，减少每轮重复启动的开销。
+  # 仅在对应 worker 数 >0 时生效；false 会在下次遍历 DataLoader 时重新启动 worker。
+  # memmap 格式在各子进程中重新打开只读数组；旧整块 tensor .pt 会各自加载，占用更多内存。
+  persistent_workers: true
+
+  # 每个训练工作进程设置的 PyTorch CPU 运算线程数，不是 DataLoader 子进程数。
+  cpu_threads: 4
+
+  # 是否启用 PyTorch 确定性算法及 cuDNN 确定性设置，以提高同环境下的可复现性。
+  # 启用后，遇到不支持确定性实现的算子可能报错；不保证跨硬件/软件版本逐位一致。
+  deterministic: true
+
+  # 每轮每隔多少个训练 step 输出一次日志，同时输出首个和最后一个 batch；0 关闭 step 日志。
+  # 日志含 batch/区间/累计 loss、学习率、速度、数据等待时间和本轮训练剩余时间估计。
+  log_every_steps: 50
+
+# 模型结构参数：只有使用对应分类头时，相应结构参数才参与模型构建。
+model:
+  # 固定高斯池化头的位置权重标准差（单位：碱基位置）；越小越侧重中心位置。
+  # 仅 center_5mer_gaussian_pool_linear_raw768 使用。
+  gaussian_sigma: 1.0
+
+  # MLP 分类头的两层隐藏层维度，必须恰好提供两个正整数；最后自动接一维分类输出。
+  mlp_hidden_dims: [512, 128]
+
+  # Residual DWConv 分类头：输入特征投影后的通道数，也是残差卷积块的通道数。
+  conv_channels: 128
+
+  # Residual DWConv 分类头：卷积特征展平后，全连接隐藏层的维度。
+  conv_head_dim: 128
+
+  # MLP 和 Residual DWConv 分类头的基础 Dropout 概率，取值 [0,1)。
+  # MLP 第一处用此值、第二处用其一半；DWConv 卷积块和分类隐藏层使用此值。
+  # 融合头的 Dropout 由下方 deepplant 单独控制。
+  dropout: 0.2
+
+  # 仅信号-碱基融合头 center_5mer_emb8_none 使用的结构参数。
+  deepplant:
+    # 信号分支 MLP 的隐藏维度：输入特征维度 -> 此维度 -> 固定 128 维。
+    signal_mlp_hidden: 256
+
+    # 信号分支 MLP 隐藏层后的 Dropout 概率，取值 [0,1)。
+    signal_mlp_dropout: 0.1
+
+    # 碱基分支 BiLSTM 每个方向的隐藏维度；双向输出为其 2 倍，再投影为固定 128 维。
+    base_hidden: 128
+
+    # 融合 BiLSTM 每个方向的隐藏维度；最终拼接两个方向，得到其 2 倍维度的分类表示。
+    fusion_hidden: 256
+
+    # 碱基分支 BiLSTM 堆叠层数；输入是固定 8 维的可学习碱基嵌入。
+    base_layers: 2
+
+    # 融合 BiLSTM 堆叠层数；输入为 128 维信号表示与 128 维碱基表示的拼接。
+    fusion_layers: 3
+
+    # 两个 BiLSTM 的层间 Dropout，以及最终分类器前的 Dropout 概率。
+    # LSTM 层间 Dropout 仅在对应层数大于 1 时启用；不控制上方信号 MLP 的 Dropout。
+    dropout: 0.5
+
+# 按分类头覆盖 training 参数：未列出的字段继承全局 training，模型结构仍使用上方 model。
+# 可在此覆盖训练参数（包括 num_workers、eval_num_workers、prefetch_factor、
+# persistent_workers、batch_read、log_every_steps），不能在这里填写模型结构参数。
+strategy_overrides:
+  # 以下覆盖仅适用于信号-碱基融合头，不影响 Linear、MLP 或 DWConv 分类头。
+  center_5mer_emb8_none:
+    # 融合头训练 batch，覆盖全局的 2048；每次用 256 个样本更新参数。
+    batch_size: 256
+
+    # 融合头验证及最终评估 batch，覆盖全局的 2048。
+    eval_batch_size: 256
+
+    # 融合头梯度裁剪上限为 0.5，覆盖全局不裁剪的设置。
+    grad_clip: 0.5
