@@ -4,6 +4,8 @@
 
 训练阶段读取预先提取的特征，只训练分类头。BERT、Diffusion 和 GPT 主干在 Step4 中用于提取表征，不在分类训练中更新。
 
+![DNA-5mC Workflow：从信号预处理、位点数据集构建、特征提取和中心裁剪，到分类头训练与评估](docs/assets/dna-5mc-workflow.png)
+
 ```text
 带比对及碱基—信号对应关系的 JSONL + bedMethyl
   → Step1 信号预处理
