@@ -21,16 +21,16 @@ wandb:
 # Use one or more of the seven strategies. To run just one, replace this list
 # with, for example: strategy: center_5mer_emb8_none
 strategies:
-  - center_base_linear_raw768
-  - center_5mer_linear_raw768
+  # - center_base_linear_raw768
+  # - center_5mer_linear_raw768
   # - center_5mer_gaussian_pool_linear_raw768
   # - center_5mer_learned_pool_linear_raw768
-  - center_5mer_mlp_raw768
-  - center_5mer_residual_dwconv_raw768
+  # - center_5mer_mlp_raw768
+  # - center_5mer_residual_dwconv_raw768
   - center_5mer_emb8_none
-seeds: [1,2,3]       # Alternatively: seed: 1
+seeds: [2,3,4]       # Alternatively: seed: 1
 device: auto          # auto, cpu, cuda:0, cuda:1
-devices: [cuda:1]
+devices: [cuda:0]
 # Fusion keeps the signal branch; the base branch is only nn.Embedding(...,8).
 # It uses no mean/std/signal-count statistics or extra statistics TSV.
 base_source: ref        # TSV ref column; use seq to select the TSV seq column
@@ -49,8 +49,8 @@ training:
   gpu_cache_chunk_size: 8192       # 每块加载的样本数，避免整份数据占用 CPU 内存
   gpu_cache_fallback: true         # 显存不足/非 CUDA 时回退；false 则直接报错
 
-  epochs: 80
-  patience: 80
+  epochs: 200
+  patience: 6
   batch_size: 2048
   eval_batch_size: 2048
   lr: 0.0001
