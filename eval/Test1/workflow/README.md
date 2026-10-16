@@ -20,9 +20,69 @@
 | 4 | [step4_evaluate.py](step4_evaluate.py) | [step4_evaluate.sh](step4_evaluate.sh) | 加载完成训练的 best.pt，输出 read/site FPR、覆盖度分层和置信区间 |
 | 5 | [step5_compare.py](step5_compare.py) | [step5_compare.sh](step5_compare.sh) | 汇总各 seed，并匹配相同 read–位点比较不同主干 |
 | 共用 | [common.py](common.py) | [common.sh](common.sh) | 原子发布、路径、SQLite 匹配和阴性统计 |
-| 测试 | [test_workflow.py](test_workflow.py) | [run_all.sh](run_all.sh) | 临时目录内的统计、真实格式、分类器及可选真实主干测试 |
+| 配置 | [extraction_config.py](extraction_config.py) | [config.yaml](config.yaml) | Step2 模型选择、参数解析及架构核对 |
+| 测试 | [test_step2_config.py](test_step2_config.py) | [run_all.sh](run_all.sh) | 配置优先级、架构兼容及可选三主干小样本提取测试 |
 
 每个 Python 入口支持 `--help`。每个 Bash 脚本中已注释参数含义，支持环境变量覆盖和追加 Python 命令行参数。所有入口都可以从任意目录调用。
+
+## Step2：统一配置不同版本和隐藏层
+
+主要修改 [config.yaml](config.yaml)：
+
+- `model`：当前选择的模型名称。
+- `extraction`：语料路径、输出位置、设备、批次、缓存精度、窗口长度等通用参数。
+- `models.<名称>`：架构、权重路径和该架构的隐藏状态选项。
+
+当前配置为 V011 → Diffusion、V543 → BERT、V610 → GPT。模型名称不再决定提取器；由 `architecture` 选择 `diffusion`、`bert` 或 `gpt`，也可设为 `auto` 根据主干 `config.json` 判断。支持与现有 PoreDLM、PoreBERT、GPT/OLMo 提取协议兼容的更新权重；结构或信号/token 协议发生变化时仍需要对应适配。
+
+默认 `extraction.data_dir` 已与当前 Step1 脚本一致，指向 `eval/Test1/data/step1_out/chr19`。所有 YAML 内部相对路径以项目根目录为基准；CLI 传入的相对路径以调用目录为基准。
+
+例如未来增加一个 BERT 版本，只需在 `models` 下新增：
+
+```yaml
+model: V554
+models:
+  V554:
+    architecture: bert
+    model_root: train/backbone/V554-BERT
+    encoder_layer: 0
+    hidden_layer: -1
+    token_offset: 128
+```
+
+上面是需合并到完整配置中的片段。`config.yaml` 中也提供了新 Diffusion / GPT 版本的注释模板。`encoder_dir`、`decoder_dir` 可以分别指定，不要求新 checkpoint 与旧版本使用同样的目录名。主干路径优先寻找 `model_root/base`；没有 base 且存在多个候选时必须明确指定 `decoder_dir`。当前 V011 已在 YAML 中明确指向原实验使用的 step65000 权重，防止自动选错。
+
+三个路径独立生效：如果条目中已经显式设置 `decoder_dir`，只修改 `model_root` 不会取消这个主干路径。切换 checkpoint 时应同步修改对应路径，并先用 dry-run 检查最终结果。
+
+隐藏层参数的索引约定不同：
+
+| 架构 | 参数 | 含义 |
+| --- | --- | --- |
+| BERT | `hidden_layer` | `hidden_states` 索引：0 是 embedding，1 是 Transformer 第 0 层输出，-1 是最终隐藏状态 |
+| GPT | `decoder_layers` | `last` 为最终隐藏状态；整数 8 表示 Transformer 第 8 层，从 0 开始编号 |
+| GPT | `selected_layer_name` | 多选如 `[3, 8]` 时，指定实际落盘的一层，如 `layer_8` |
+| Diffusion | `hidden_source` 和 ODE 参数 | 选择 `ode_hidden`、`context_hidden`、`last_hidden` 等原提取器支持的表征来源 |
+
+每次输出保存一个目标层/表征来源。比较同一模型的多个隐藏层时，使用不同 `out_dir` 或 `FEATURES_DIR`。改变主干、层或 ODE 协议后，需要使用在对应特征上训练的分类头；评测器会核对训练协议。
+
+```bash
+# 不加载权重、不创建特征，只展示最终解析配置并核对模型 config 路径。
+DRY_RUN=1 bash eval/Test1/workflow/step2_extract_features.sh
+
+# 临时切换 YAML 已配置的模型。
+VERSION=V543 DRY_RUN=1 bash eval/Test1/workflow/step2_extract_features.sh
+
+# 临时选择 BERT 的 hidden_states[6]，并单独命名输出目录。
+VERSION=V543 HIDDEN_LAYER=6 \
+FEATURES_DIR=/path/to/new/V543_hidden6 \
+  bash eval/Test1/workflow/step2_extract_features.sh
+
+# 使用另外一份完整 YAML。
+EXTRACTION_CONFIG=/path/to/experiment.yaml \
+  bash eval/Test1/workflow/step2_extract_features.sh
+```
+
+优先级为：**追加的命令行参数 > 显式环境变量 > YAML 模型条目/通用设置 > 架构默认值**。启动器不会用 `common.sh` 中自动补齐的默认值覆盖 YAML。最终配置同时保存在 `resolved_extraction_config.json` 和 `feature_summary.json` 中，便于复核实际用的权重路径、层和参数。
 
 ## 只做测试
 
@@ -32,19 +92,15 @@
 bash /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/workflow/run_all.sh --test
 ```
 
-该测试包含少量真实 WGA 窗口和三个真实预训练主干，默认使用 CPU。需要调试日志时：
-
-```bash
-bash eval/Test1/workflow/run_all.sh --test --keep-temp
-```
+该测试先验证配置解析与下游协议检查，再使用少量真实 WGA 窗口和三个真实预训练主干验证新版本名、隐藏层选择及缓存格式，默认使用 CPU。测试使用已有权重模拟新配置项，不代表已经验证未来尚未提供的模型权重。
 
 不加载真实主干的快速联调，可在已经激活项目环境后执行：
 
 ```bash
-python eval/Test1/workflow/test_workflow.py
+python eval/Test1/workflow/test_step2_config.py
 ```
 
-此模式仍会检查已有训练分类头的实际权重，不只是做语法检查。模型定义、原提取脚本、权重目录和原训练特征清单需要保留。
+快速模式只进行配置、参数转发、旧分类器协议兼容和错误拒绝测试，不加载模型权重。完整小样本测试还需要原提取脚本和三个主干权重；不会扫描完整 WGA 文件。
 
 ## 正式运行命令：本次未执行
 
@@ -76,7 +132,7 @@ STRATEGIES="center_base_linear_raw768" \
   bash eval/Test1/workflow/step4_evaluate.sh
 ```
 
-`DRY_RUN=1` 不创建输出，不检查完整数据和权重是否能执行。
+`DRY_RUN=1` 不创建输出，不检查完整数据和权重是否能执行。Step2 会额外解析 YAML、检查模型 config 路径并显示最终设置；其他步骤仍只显示命令。
 
 ## 常用参数
 
@@ -90,7 +146,9 @@ STRATEGIES="center_base_linear_raw768" \
 | `CANDIDATE_SITES` | 空 | 可选无表头 TSV，列为 chrom 和 0-based position，来自独立位点集合 |
 | `LIBRARY_ID` | `WGA_UNMOD_chr19` | 文库标识，不同文库不能混用 |
 | `MAX_RECORDS` / `MAX_WINDOWS` | 空 | 仅用于受限测试；有限输入结果带 `partial_test` 标记 |
-| `VERSION` | `V610` | 单步运行的主干版本 |
+| `EXTRACTION_CONFIG` | `workflow/config.yaml` | Step2 配置文件 |
+| `VERSION` | Step2 采用 YAML 的 `model` | 模型名称，允许新增版本 |
+| `MODEL_ARCH` | 采用 YAML 模型条目 | Step2 架构：diffusion / bert / gpt / auto |
 | `DEVICE` / `CPU_THREADS` | `auto` / `4` | 设备和 CPU 算子线程 |
 | `BATCH_SIZE` | `4` | 主干提取批次 |
 | `FEATURE_DTYPE` | `float16` | 缓存存储精度 |
@@ -108,6 +166,8 @@ STRATEGIES="center_base_linear_raw768" \
 
 可单独覆盖 `DATA_DIR`、`FEATURES_DIR`、`CROPPED_DIR`、`RESULTS_DIR`、`RESULTS_ROOT` 和 `COMPARISON_DIR`。建议正式一键流程仅修改 `TEST1_OUTPUT_ROOT`，避免把不同阶段指向不一致目录。
 
+当前 Step1 已单独设置了数据输出目录，因此自定义整套输出位置时还应同步 `DATA_DIR` 或 Step2 YAML 的 `extraction.data_dir`。新增模型参加整个评测时，应提供相应训练 run，并通过 `VERSIONS` 指定要循环的模型名；Step2 的配置文件只控制特征提取。
+
 ## 输出和计算规则
 
 ```text
@@ -118,6 +178,7 @@ output/
 │   ├── sites.tsv
 │   └── dataset_manifest.json
 ├── features/<VERSION>/                # [N,15,768]
+│   └── resolved_extraction_config.json # 实际提取配置；新模型维度由其配置决定
 ├── center5/<VERSION>/                 # [N,5,768]
 ├── results/<VERSION>/<run>/
 │   ├── predictions.sqlite
@@ -147,9 +208,11 @@ output/
 
 ## 测试范围与限制
 
-测试工具检查已知概率样本的 FPR 分母、独立 read 去重、低覆盖位点、严格负标签、错误主干拒绝、融合头 softmax、中心裁剪等价性，以及共同样本比较。真实主干测试仅使用受限窗口，不用于判断模型真实假阳性水平。
+当前测试工具检查 YAML/环境变量/命令行优先级、新模型名称、独立权重路径、架构推断、隐藏层参数转发及错误参数拒绝，并验证旧分类器协议仍能核对。真实主干测试仅使用受限窗口，不用于判断模型真实假阳性水平。
 
-2026-10-16 的验证已通过：12 个已有 seed1 分类器的实际权重加载与前向推理；三个真实预训练主干分别处理 4 个用户 WGA 窗口；完整的 test 裁剪、分类及共同样本汇总；已知概率的统计核对；缺失 read 后的交集和覆盖度重算；融合头分支；以及三个版本原 test 文件前 16 条保存概率的复现。真实模型测试使用 CPU；当前进程未检测到可用 CUDA，因此本次没有验证 GPU 路径。所有成功测试的中间结果已清理，没有启动全量评测。
+2026-10-16 的早期流程验证已通过：12 个已有 seed1 分类器的实际权重加载与前向推理；三个真实预训练主干分别处理 4 个用户 WGA 窗口；完整的 test 裁剪、分类及共同样本汇总；已知概率的统计核对；缺失 read 后的交集和覆盖度重算；融合头分支；以及三个版本原 test 文件前 16 条保存概率的复现。
+
+本次配置重构后，额外通过了 10 项配置/协议测试，以及三个架构使用新配置名的真实提取测试。每个主干仅提取 1 个真实 WGA 窗口；其中 BERT 选择 `hidden_states[6]`，GPT 选择 `layer_8`，Diffusion 保持原 ODE 设置。测试使用已有权重模拟新版本条目，没有验证尚未提供的新权重。真实模型测试使用 CPU，未验证 GPU 路径；成功测试的临时结果已清理，没有启动全量评测。
 
 训练协议核对依赖原 run 保存的 `feature_dir/feature_summary.json`。若模型迁移后该目录不可访问，应先恢复或显式迁移其清单；程序不会跳过协议核对。默认 chr19 与原训练染色体重合，因此结果应称为独立 WGA 文库测试，不能自动解释为未见基因组位点泛化。
 

@@ -5,9 +5,9 @@ TEST1_WORKFLOW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${TEST1_WORKFLOW_DIR}/../../../workflow/paths.sh"
 # TEST1_OUTPUT_ROOT：正式结果的根目录；测试工具会改到 /tmp 并自动清理。
 TEST1_OUTPUT_ROOT="${TEST1_OUTPUT_ROOT:-${PROJECT_ROOT}/eval/Test1/output}"
-# VERSION：主干版本，只允许 V011、V543、V610。
+# VERSION：模型标识，可使用后续新版本；架构在 Step2 config.yaml 中单独配置。
 VERSION="${VERSION:-V610}"
-case "${VERSION}" in V011|V543|V610) ;; *) echo 'Invalid VERSION' >&2; exit 2;; esac
+[[ "${VERSION}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || { echo 'Invalid VERSION name' >&2; exit 2; }
 # DEVICE：auto 自动选择可用 GPU/CPU；可以显式设 cpu、cuda:0。
 DEVICE="${DEVICE:-auto}"
 # CPU_THREADS：每个 Python 进程使用的 CPU 算子线程数。

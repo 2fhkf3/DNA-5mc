@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import re
 import shutil
 import sqlite3
 import sys
@@ -20,6 +21,32 @@ RAW_INPUT = Path('/mnt/zzbnew/rnamodel/jinyue/data/processed_data/chr19/unmod/'
                  's2_all_reads.genome_signal.preprocessed.jsonl')
 VERSIONS = ('V011', 'V543', 'V610')
 KEYS = ('library_id', 'read_id', 'chrom', 'position', 'strand')
+
+
+def valid_model_name(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', value):
+        raise ValueError('Model version must be a nonempty name containing letters, digits, _, - or .')
+    return value
+
+
+def infer_architecture(config):
+    explicit = config.get('model_architecture')
+    if explicit in ('diffusion', 'bert', 'gpt'):
+        return explicit
+    names = ' '.join(str(config.get(k, '')) for k in ['model_type', 'model_family', 'architectures']).lower()
+    if 'diffusion' in names or 'poredlm' in names:
+        return 'diffusion'
+    if 'bert' in names:
+        return 'bert'
+    if 'gpt' in names or 'olmo' in names:
+        return 'gpt'
+    if config.get('hidden_source') is not None:
+        return 'diffusion'
+    if config.get('hidden_layer') is not None:
+        return 'bert'
+    if config.get('decoder_layers') is not None:
+        return 'gpt'
+    return None
 
 
 def module(name, path):

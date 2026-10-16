@@ -189,6 +189,8 @@ train/output/<experiment>/runs/<strategy>_seed<N>/
 
 ### 4.2 与现有 v2 特征一致的关键设置
 
+Step2 现在通过 [workflow/config.yaml](workflow/config.yaml) 配置模型名称、架构、权重路径和隐藏层，启动方式见 [工作流说明](workflow/README.md)。下表描述原 v2 分类头使用的基线协议；新版本或新隐藏层可通过新增配置提取，但应配套在相应特征上训练的分类头。
+
 以下依据当前 `train/data/*/feature_summary.json` 核对。正式运行仍需核对具体 checkpoint、tokenizer、模型配置和提取实现；目录名称相同不保证权重相同。
 
 | 版本 | 主干特征协议 |

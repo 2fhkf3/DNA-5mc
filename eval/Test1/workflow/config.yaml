@@ -1,0 +1,90 @@
+# 仅用于 Step2 隐藏状态提取；不会修改分类器训练配置。
+# 用法：bash eval/Test1/workflow/step2_extract_features.sh
+# 切换已配置模型：VERSION=V543 bash eval/Test1/workflow/step2_extract_features.sh
+# 预览最终配置：DRY_RUN=1 bash eval/Test1/workflow/step2_extract_features.sh
+# 所有 YAML 相对路径均以 DNA-5mC 项目根目录为基准；支持绝对路径和 ~。
+
+model: V610                  # 当前选择的 models 条目；V610 是 GPT 架构。
+
+extraction:
+  # 与你当前 Step1 脚本的输出位置一致；切换语料时修改这里。
+  data_dir: eval/Test1/data/step1_out/chr19
+  # null：自动使用 output_root/features/<模型名称>。比较同一模型的不同层时设不同目录。
+  out_dir: null
+  output_root: eval/Test1/data/step2_output
+  device: cuda:0               # auto、cpu、cuda:0 等。
+  cpu_threads: 4             # 单进程 CPU 算子线程数。
+  batch_size: 8              # 主干提取批次；小规模 CPU 测试建议 1。
+  dtype: float16             # 输出缓存精度：float16 / float32，主干遵循原提取器的计算协议。
+  window_size: 15            # 输入碱基窗口长度，必须与数据清单一致；不是 Step3 的裁剪长度。
+  preprocess: none           # 输入已经预处理时使用 none，避免重复归一化。
+  save_every: 512            # 多少条特征写一次缓存，影响内存与 I/O，不改变目标隐藏层。
+  log_every: 1000            # 提取器的进度日志间隔；0 禁用常规间隔日志。
+  limit: null                # 只处理前 N 个窗口；仅供测试，正式运行保持 null。
+
+# architecture 决定使用哪个提取器，与 Vxxx 名称完全分开。
+# 新模型直接在 models 下新增条目，不需要在 Python 中增加版本分支。
+# 模型条目也可覆盖通用参数，例如 batch_size 或 out_dir，优先于 extraction。
+# 支持现有 PoreDLM、PoreBERT、GPT/OLMo 提取协议兼容的 checkpoint。
+# encoder_dir / decoder_dir 为 null 时从 model_root 解析，也可以分别指定绝对路径。
+models:
+  V011:
+    architecture: diffusion
+    model_root: train/backbone/V011-Diffusion
+    encoder_dir: null        # 默认 model_root/encoder。
+    # 当前 V011 根目录有多个 checkpoint，因此明确指定原实验所用权重。
+    # 新版本可以填写任意 checkpoint 路径；只有一个候选时也可以设为 null 自动寻找。
+    decoder_dir: train/backbone/V011-Diffusion/hf_dlm_elf_mixed_with_cls_token_step65000-unsharded
+    encoder_layer: 0         # 当前 PoreDLM FSQ 提取协议要求 0。
+    hidden_source: ode_hidden  # ode_hidden / context_hidden / last_hidden / last_hidden_state。
+    ode_steps: 1             # ODE 推进步数，仅 ode_hidden 模式使用。
+    ode_start_t: 0.97        # ODE 起始时间。
+    ode_self_cond_cfg_scale: 0.5  # 自条件 CFG 系数。
+    last_t: 1.0             # last_hidden 模式的时间参数，按原主干协议解释。
+
+  V543:
+    architecture: bert
+    model_root: train/backbone/V543-BERT
+    encoder_dir: null        # 默认 model_root/encoder。
+    decoder_dir: null        # 通常自动解析为 model_root/base。
+    encoder_layer: 0         # codec 使用的量化轨道参数，沿用原训练协议。
+    hidden_layer: -1        # hidden_states 索引：0 为 embedding，1 为首层输出，-1 为最后输出。
+    token_offset: 128        # codec token 到主干词表的偏移，不要随意改变。
+
+  V610:
+    architecture: gpt
+    model_root: train/backbone/V610-GPT
+    encoder_dir: null
+    decoder_dir: null
+    encoder_layer: 1
+    decoder_layers: last     # last、embed 或从 0 开始的 Transformer 层编号，如 8。
+    selected_layer_name: null  # 多选如 "embed,8" 时必须指定 embed / layer_8 中的一个。
+    token_id_mode: auto      # auto / tokenizer / offset / direct，沿用模型的 token 映射约定。
+    tokenizer_file: null     # null 时由原提取器从主干目录寻找 tokenizer.json。
+    token_offset: 128        # token_id_mode=offset 时的映射偏移。
+    special_tokens: none    # none / bos_eos，必须匹配相应主干训练方式。
+    codec_mode: auto         # auto / reference，控制 codec 实现路径。
+    max_tokens: null         # 可选更严格的上下文上限，包含特殊 token。
+    overlong_policy: skip   # 超长窗口：skip 跳过并记录，error 立即报错。
+
+  # 新 BERT 版本示例：取消注释后将 model 改为 V554 即可。
+  # V554:
+  #   architecture: bert
+  #   model_root: train/backbone/V554-BERT
+  #   hidden_layer: -1
+  #   encoder_layer: 0
+  #   token_offset: 128
+
+  # 新 Diffusion 版本：也可直接指定不同的 encoder 和训练 checkpoint，独立于根目录结构。
+  # V012:
+  #   architecture: diffusion
+  #   encoder_dir: /path/to/V012/encoder
+  #   decoder_dir: /path/to/V012/checkpoint_step100000
+  #   hidden_source: ode_hidden
+  #   ode_start_t: 0.97
+
+  # 新 GPT 版本：名称仅用于标识，架构由 architecture 明确指定。
+  # V611:
+  #   architecture: gpt
+  #   model_root: /path/to/V611
+  #   decoder_layers: 8

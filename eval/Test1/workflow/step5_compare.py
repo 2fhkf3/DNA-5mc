@@ -8,14 +8,14 @@ import sqlite3
 from collections import defaultdict
 from pathlib import Path
 
-from common import VERSIONS, install_sql_math, output_directory, read_json, summarize, tsv, write_json
+from common import VERSIONS, valid_model_name, install_sql_math, output_directory, read_json, summarize, tsv, write_json
 
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--results-dir', type=Path, required=True, help='包含 V011/V543/V610 子目录的推理结果根目录')
     p.add_argument('--out-dir', type=Path, required=True, help='新的汇总目录，禁止覆盖')
-    p.add_argument('--versions', nargs='+', choices=VERSIONS, default=list(VERSIONS), help='进行共同样本比较的主干版本')
+    p.add_argument('--versions', nargs='+', type=valid_model_name, default=list(VERSIONS), help='共同样本比较的模型名称，支持新版本')
     p.add_argument('--bootstrap', type=int, default=1000, help='配对区块 bootstrap 次数；0 禁用')
     p.add_argument('--block-size', type=int, default=1_000_000, help='基因组区块长度 bp')
     p.add_argument('--bootstrap-seed', type=int, default=42, help='配对重采样随机种子')

@@ -9,7 +9,7 @@ if [[ $# -gt 0 ]]; then shift; fi
 case "${mode}" in
     --test)
         # 测试全部写入临时目录，结束自动清理；不会运行全量 207 GB 输入。
-        run_test1_command "${PYTHON_BIN}" "${TEST1_WORKFLOW_DIR}/test_workflow.py" --real-input --backbones "$@"
+        run_test1_command "${PYTHON_BIN}" "${TEST1_WORKFLOW_DIR}/test_step2_config.py" --real-input --backbones "$@"
         ;;
     --run)
         if [[ $# -gt 0 ]]; then echo 'Use environment variables for --run settings' >&2; exit 2; fi

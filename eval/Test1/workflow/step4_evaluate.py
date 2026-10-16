@@ -9,7 +9,7 @@ import json
 import sys
 from pathlib import Path
 
-from common import (PROJECT, VERSIONS, install_sql_math, open_text, output_directory,
+from common import (PROJECT, infer_architecture, valid_model_name, install_sql_math, open_text, output_directory,
                     prediction_db, read_json, sha256, signature, summarize, tsv, write_json)
 
 
@@ -20,7 +20,7 @@ def parser():
     group.add_argument('--runs-root', type=Path, help='批量扫描 experiment 根目录或其 runs 子目录')
     p.add_argument('--feature-dir', type=Path, required=True, help='Test1 的 test.pt / bin / metadata 目录')
     p.add_argument('--out-dir', type=Path, required=True, help='单 run 结果目录，或批量结果的父目录')
-    p.add_argument('--version', choices=VERSIONS, required=True, help='用于核对特征来源和 checkpoint 版本')
+    p.add_argument('--version', type=valid_model_name, required=True, help='用于核对特征来源和 checkpoint 版本，支持新版本名')
     p.add_argument('--strategies', nargs='+', help='批量时限制分类头；默认所有已完成的分类头')
     p.add_argument('--seeds', nargs='+', type=int, default=[1, 2, 3], help='批量时使用的训练 seed')
     p.add_argument('--device', default='auto', help='auto / cpu / cuda:N')
@@ -40,15 +40,18 @@ def parser():
 def check_protocol(summary, config, version):
     if summary.get('eval_version') != version:
         raise ValueError('Feature version does not match --version')
-    if not config.get('experiment', '').upper().startswith(version):
+    if not config.get('experiment', '').upper().startswith(version.upper()):
         raise ValueError('Checkpoint experiment does not match feature version')
     old_file = Path(config['feature_dir'])/'feature_summary.json'
     if not old_file.is_file():
         raise FileNotFoundError(f'Cannot verify training feature protocol: {old_file}')
     old = read_json(old_file)
-    keys = {'V011': ['encoder_layer', 'hidden_source', 'ode_steps', 'ode_start_t', 'ode_self_cond_cfg_scale', 'last_t'],
-            'V543': ['encoder_layer', 'hidden_layer', 'token_offset'],
-            'V610': ['encoder_layer', 'decoder_layers', 'input_layout', 'resolved_token_id_mode', 'selected_layer_name']}[version]
+    architecture = infer_architecture(summary)
+    if architecture is None or architecture != infer_architecture(old):
+        raise ValueError('Feature architecture does not match the training feature protocol')
+    keys = {'diffusion': ['encoder_layer', 'hidden_source', 'ode_steps', 'ode_start_t', 'ode_self_cond_cfg_scale', 'last_t'],
+            'bert': ['encoder_layer', 'hidden_layer', 'token_offset'],
+            'gpt': ['encoder_layer', 'decoder_layers', 'input_layout', 'resolved_token_id_mode', 'selected_layer_name']}[architecture]
     for key in ['preprocess', *keys]:
         if key in old and summary.get(key) != old[key]:
             raise ValueError(f'Feature protocol mismatch for {key}: {summary.get(key)!r} != {old[key]!r}')
