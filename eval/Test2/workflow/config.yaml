@@ -1,0 +1,52 @@
+# Test2：天然 chr16 参考阳性漏检评测。所有路径为绝对路径。
+enabled_versions: [V011, V543, V554, V610] # 参与各步骤的模型，可用 --version 临时只选一个
+library_id: NATIVE_250F500490011          # 同一天然文库跨主干、跨 Test1/Test2 保持一致
+chromosome: chr16                       # 只接受原 test 染色体；当前训练仅覆盖正链
+reference_validation_status: unverified # 原 BED 真值来源尚未独立核实；选择标签不等于实验验证
+data_root: /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test2/data/native_bed100
+results_root: /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test2/output/results
+comparison_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test2/output/comparison
+
+selection:
+  chunk_size: 4096           # Step1 同步读取特征、标签及元数据的输入窗口数
+  log_every_chunks: 32       # 每多少块报告一次筛选进度
+
+evaluation:
+  source: predictions       # predictions：复用已保存预测，无需 GPU/Step1；features：Step1 后重新推理
+  strategies: []            # 空列表表示全部已完成策略；填写策略名可限制评测范围
+  seeds: []                 # 空列表表示全部已有 seed，支持 1/2/3、4/5/6 等，不硬编码三次运行
+  read_threshold: null       # null 沿用各 run 的 training.threshold；显式数值须在独立校准集冻结
+  site_threshold: 0.5        # 位点平均正类概率的阳性阈值；恰等于阈值判 TP
+  device: auto               # 仅 features 使用：auto / cpu / cuda:0 / cuda:1
+  batch_size: 2048           # 分类头推理批次；不将全量特征加载到显存
+  cpu_threads: 4             # CPU 算子线程数
+  save_read_predictions: true # 保存阳性逐窗口 TSV.gz；匹配用 SQLite 始终保留
+
+statistics:
+  coverage_minima: [1, 5]    # 同时报告全部阳性及最终实际 coverage>=5；先匹配再算覆盖度
+  thresholds: [0.1, 0.3, 0.5, 0.7, 0.9] # 描述性敏感性分析，不用 Test2 挑最优阈值
+  block_size: 1000000        # 基因组 bootstrap 区块宽度，bp
+  bootstrap: 1000            # 重采样次数；联调可设为0，正式分析保留预先约定次数
+  bootstrap_seed: 42         # 区块重采样 seed，与模型训练 seed 无关
+
+comparison:
+  allow_partial: false       # 正式比较拒绝 --max-records 或上游限量产生的结果
+
+# 新模型只需新增同结构条目并修改 enabled_versions；各主干使用自身特征，禁止跨主干混用。
+models:
+  V011:
+    architecture: diffusion
+    feature_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V011-V2
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V011-v2
+  V543:
+    architecture: bert
+    feature_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V543-V2
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V543-v2
+  V554:
+    architecture: bert
+    feature_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V554-V2
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V554-v2
+  V610:
+    architecture: gpt
+    feature_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V610-V2
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V610-v2
