@@ -31,7 +31,7 @@ def parser():
     p.add_argument('--bootstrap', type=int, default=1000, help='基因组区块 bootstrap 次数；0 为禁用')
     p.add_argument('--block-size', type=int, default=1_000_000, help='bootstrap 区块大小，单位 bp')
     p.add_argument('--bootstrap-seed', type=int, default=42, help='重采样随机种子，与训练 seed 无关')
-    p.add_argument('--library-id', help='仅在特征没有 Test1 文库清单时手动指定')
+    p.add_argument('--library-id', help='仅在特征没有阴性评测文库清单时手动指定')
     p.add_argument('--save-read-predictions', action=argparse.BooleanOptionalAction, default=True,
                    help='另存逐窗口 TSV.gz；SQLite 匹配索引始终保存')
     return p
@@ -103,7 +103,7 @@ def evaluate(args, run_dir, output):
         raise ValueError('Invalid fusion window')
     library = args.library_id or summary.get('test1_dataset', {}).get('library_id')
     if not library:
-        raise ValueError('Missing WGA library identity')
+        raise ValueError('Missing negative-control library identity')
     threshold = args.threshold if args.threshold is not None else float(config['training']['threshold'])
     if not 0 < threshold < 1:
         raise ValueError('Read threshold must be between 0 and 1')
@@ -130,7 +130,7 @@ def evaluate(args, run_dir, output):
                     hi = min(lo+args.batch_size, n)
                     rows = list(itertools.islice(reader, hi-lo))
                     if len(rows) != hi-lo or not (y[lo:hi] == 0).all():
-                        raise ValueError('Metadata count mismatch or nonnegative WGA labels')
+                        raise ValueError('Metadata count mismatch or nonzero negative-control labels')
                     features = np.array(x[lo:hi, start:start+window], dtype=np.float32, copy=True)
                     if not np.isfinite(features).all():
                         raise ValueError('Nonfinite features')
@@ -182,6 +182,11 @@ def evaluate(args, run_dir, output):
             metrics.update(version=args.version, strategy=config['strategy'], seed=config['seed'],
                            checkpoint_epoch=checkpoint['epoch'], library_id=library,
                            partial_test=summary.get('test1_dataset', {}).get('partial_test', False))
+            dataset = summary.get('test1_dataset', {})
+            truth_source = dataset.get('truth_source', summary.get('truth_source', 'unspecified_reference'))
+            metrics.update(truth_source=truth_source,
+                           dataset_kind=dataset.get('dataset_kind', summary.get('dataset_kind',
+                               'wga_unmod' if truth_source == 'WGA_negative_control' else 'unspecified_negative_control')))
             write_json(stage/'metrics.json', metrics)
             tsv(stage/'coverage_metrics.tsv', metrics['coverage'], ['coverage', 'n', 'fp', 'tn', 'fpr', 'specificity'])
             tsv(stage/'context_metrics.tsv', metrics['contexts'], ['ref', 'n', 'fp', 'tn', 'fpr', 'specificity'])

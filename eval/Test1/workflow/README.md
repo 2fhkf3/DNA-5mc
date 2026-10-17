@@ -15,6 +15,7 @@
 | 顺序 | Python | Bash | 功能 |
 | --- | --- | --- | --- |
 | 1 | [step1_build_unmod_windows.py](step1_build_unmod_windows.py) | [step1_build_unmod_windows.sh](step1_build_unmod_windows.sh) | 提取 15 nt 正链窗口、按原始 read 去重、计算覆盖度和保存审计索引 |
+| 1.1（天然阴性分支） | [step1.1_build_native_negatives.py](step1.1_build_native_negatives.py) | [step1.1_build_native_negatives.sh](step1.1_build_native_negatives.sh) | 从已有 test 缓存同步筛选 label=0 特征、标签、元数据；直接供 Step4 使用 |
 | 2 | [step2_extract_features.py](step2_extract_features.py) | [step2_extract_features.sh](step2_extract_features.sh) | 复用原三种主干的提取实现，仅处理 test |
 | 3 | [step3_center_crop.py](step3_center_crop.py) | [step3_center_crop.sh](step3_center_crop.sh) | 将 test 表征从 15 个位置裁剪到中心 5 个，保留原上下文 |
 | 4 | [step4_evaluate.py](step4_evaluate.py) | [step4_evaluate.sh](step4_evaluate.sh) | 加载完成训练的 best.pt，输出 read/site FPR、覆盖度分层和置信区间 |
@@ -24,6 +25,57 @@
 | 测试 | [test_step2_config.py](test_step2_config.py) | [run_all.sh](run_all.sh) | 配置优先级、架构兼容及可选三主干小样本提取测试 |
 
 每个 Python 入口支持 `--help`。每个 Bash 脚本中已注释参数含义，支持环境变量覆盖和追加 Python 命令行参数。所有入口都可以从任意目录调用。
+
+## Step1.1：从天然 test 构建 BED=0 阴性特征集
+
+这是与 WGA 评测并行的补充实验。默认输入为：
+
+```text
+/home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V011-V2
+```
+
+该目录的 test 已经是中心裁剪后的 `[N, 5, 768]` 隐藏状态缓存，不含原始信号。本步骤只在原 test 中选择 `label=0`，同步复制对应特征、原标签和元数据，保持顺序、数值、精度、坐标、原始 read ID 和裁剪上下文，不重新运行主干，不把阳性改成阴性，也不读取 train/valid。
+
+这种构造可评估“天然参考标签为阴性的测试子集上的误报”，可与原 test 的阳性 Recall 并列。它复用了已有测试子集，不构成新增独立实验重复；标签可靠性继承原 BED 的生成方法和覆盖度，筛选本身不能证明真实修饰率为零。比较 WGA 时应区分文库，并匹配位点、上下文和覆盖度。`source=mod` 是原天然文库来源，不表示该窗口 `label=1`，本步骤保留它。
+
+```bash
+# 只读预览：检查清单/数组大小/二进制标签，显示负样本数及磁盘估计，不写输出。
+DRY_RUN=1 bash eval/Test1/workflow/step1.1_build_native_negatives.sh
+
+# 正式构建：仅使用 CPU，直接输出到指定的 step3_output。
+bash eval/Test1/workflow/step1.1_build_native_negatives.sh
+
+# 隔离联调：只处理原 test 前 128 个窗口，输出会标记 partial_test=true。
+MAX_RECORDS=128 OUT_DIR=/tmp/native_bed0_smoke \
+  bash eval/Test1/workflow/step1.1_build_native_negatives.sh
+```
+
+默认输出目录为 `/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step3_output`，允许预先创建的空目录，拒绝覆盖非空目录。全量 V011 输入包含 1,295,166 个阴性窗口，FP16 特征与标签本身约 9.95 GB，另需元数据和审计索引空间。脚本分块复制、检查标签和 TSV 对齐、拒绝重复 read–位点，并在完成后发布输出；失败时清理临时数据。
+
+```text
+step3_output/
+├── test.pt / test.features.f16.bin / test.labels.f32.bin
+├── metadata_test.tsv              # sample_index 为新行号，source_sample_index 指向输入行号
+├── feature_summary.json           # 保留主干协议，记录 dataset_kind=native_bed0
+├── dataset_manifest.json          # 天然阴性来源、计数、位点及输入签名
+├── selection_manifest.json        # 实际筛选参数及脚本哈希
+├── sample_audit.sqlite            # 原始 read–位点去重和行号映射
+└── sites.tsv                     # 由实际保留窗口重新计算的覆盖度
+```
+
+`INPUT_DIR`、`OUT_DIR`、`VERSION`、`LIBRARY_ID`、`CHUNK_SIZE` 等可通过环境变量覆盖，含义见 Shell 注释。默认天然文库 ID 为 `NATIVE_250F500490011`；使用其他文库时应修改，同文库切换主干时保持一致。原始元数据缺失的 MAPQ 保持为空，不虚构质量值，也不额外应用覆盖度/MAPQ 筛选。
+
+本步骤输出已经是特征缓存，**直接进入 Step4**，不经过 WGA Step2，也无需再次裁剪：
+
+```bash
+VERSION=V011 \
+RUNS_ROOT=/home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V011-v2 \
+CROPPED_DIR=/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step3_output \
+RESULTS_DIR=/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/output/native_bed0/V011 \
+  bash eval/Test1/workflow/step4_evaluate.sh
+```
+
+Step4 在指标中保留 `dataset_kind` 和 `truth_source`，天然阴性结果存放在 WGA `results/` 之外，避免误当作 WGA 汇总。只能使用在相同 V011 表征协议上训练的分类头；比较 BERT/GPT 时应从各自缓存重新运行本步骤，不能共用 V011 隐藏状态。
 
 ## Step2：统一配置不同版本和隐藏层
 

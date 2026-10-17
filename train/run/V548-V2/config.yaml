@@ -1,12 +1,12 @@
 # Run from DNA-5mC/train/: bash run/V543-v2/run.sh
 # All relative paths below are resolved against DNA-5mC/train/.
 # Feature paths are relative to train/; choose the model-specific Step4/Step5 output.
-feature_dir: data/V554-V2
+feature_dir: data/V548-V2
 # Read metadata_train.tsv, metadata_valid.tsv and metadata_test.tsv from this
 # directory. null follows feature_dir automatically; a separate path is optional.
 metadata_dir: null
 output_dir: output
-experiment: V554-v2
+experiment: V548-v2
 
 # 每个分类头/seed 独立记录；已完成实验仍跳过，新实验请使用新的 experiment。
 wandb:
@@ -16,17 +16,17 @@ wandb:
   name: null              # 使用 experiment/分类头_seedN
   group: null             # 使用 experiment 分组
   mode: online            # 可用 WANDB_MODE=offline 切换离线
-  tags: [V554]
+  tags: [V548]
 
 # Use one or more of the seven strategies. To run just one, replace this list
 # with, for example: strategy: center_5mer_emb8_none
 strategies:
-  # - center_base_linear_raw768
-  # - center_5mer_linear_raw768
+  - center_base_linear_raw768
+  - center_5mer_linear_raw768
   # - center_5mer_gaussian_pool_linear_raw768
   # - center_5mer_learned_pool_linear_raw768
-  # - center_5mer_mlp_raw768
-  # - center_5mer_residual_dwconv_raw768
+  - center_5mer_mlp_raw768
+  - center_5mer_residual_dwconv_raw768
   - center_5mer_emb8_none
 seeds: [1,2,3]       # Alternatively: seed: 1
 device: auto          # auto, cpu, cuda:0, cuda:1
@@ -49,7 +49,7 @@ training:
   gpu_cache_chunk_size: 8192       # 每块加载的样本数，避免整份数据占用 CPU 内存
   gpu_cache_fallback: true         # 显存不足/非 CUDA 时回退；false 则直接报错
 
-  epochs: 80
+  epochs: 120
   patience: 6
   batch_size: 2048
   eval_batch_size: 2048
