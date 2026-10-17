@@ -4,7 +4,7 @@
 # 预览最终配置：DRY_RUN=1 bash eval/Test1/workflow/step2_extract_features.sh
 # 所有 YAML 相对路径均以 DNA-5mC 项目根目录为基准；支持绝对路径和 ~。
 
-model: V610                  # 当前选择的 models 条目；V610 是 GPT 架构。
+model: V011                  # 当前选择的 models 条目；V610 是 GPT 架构。
 
 extraction:
   # 与你当前 Step1 脚本的输出位置一致；切换语料时修改这里。
@@ -14,7 +14,15 @@ extraction:
   output_root: eval/Test1/data/step2_output
   device: cuda:0               # auto、cpu、cuda:0 等。
   cpu_threads: 4             # 单进程 CPU 算子线程数。
-  batch_size: 8              # 主干提取批次；小规模 CPU 测试建议 1。
+  batch_size: 32             # Diffusion/GPT 主干批次；OOM 自动拆小；CPU 测试建议 1。
+  # BERT 条目保留原 batch_size=8；其 high 精度下改为 32 会增加特征数值差异。
+  codec_batch_size: 1        # 默认保留逐条 codec；32 可试验等长批量编码，但可能改变量化 token。
+  # 注意：真实 1024 窗口测试中 V543 的批量 codec 有 21 个窗口 token 不同，正式对比建议保持 1。
+  # 这来自卷积批次形状的数值差异，即使不补零也无法保证离散量化完全一致。
+  codec_buffer_size: 1024    # 最多暂存多少个有效窗口用于按信号长度分组；不补零，输出顺序不变。
+  pooling_device: model     # model：在模型设备上 FP32 聚合后传回 CPU；cpu：原 CPU 聚合。
+  # 恢复旧执行方式：batch_size: 8、codec_batch_size: 1、pooling_device: cpu。
+  # 批量运算/聚合顺序可能产生浮点舍入差异，不保证特征逐位相同；dtype 仍仅控制落盘精度。
   dtype: float16             # 输出缓存精度：float16 / float32，主干遵循原提取器的计算协议。
   window_size: 15            # 输入碱基窗口长度，必须与数据清单一致；不是 Step3 的裁剪长度。
   preprocess: none           # 输入已经预处理时使用 none，避免重复归一化。
@@ -44,6 +52,7 @@ models:
 
   V543:
     architecture: bert
+    batch_size: 8           # 保留原 BERT 批次形状；可试验 32，需复核分类器输出。
     model_root: train/backbone/V543-BERT
     encoder_dir: null        # 默认 model_root/encoder。
     decoder_dir: null        # 通常自动解析为 model_root/base。
@@ -68,12 +77,13 @@ models:
     overlong_policy: skip   # 超长窗口：skip 跳过并记录，error 立即报错。
 
   # 新 BERT 版本示例：取消注释后将 model 改为 V554 即可。
-  # V554:
-  #   architecture: bert
-  #   model_root: train/backbone/V554-BERT
-  #   hidden_layer: -1
-  #   encoder_layer: 0
-  #   token_offset: 128
+  V554:
+    architecture: bert
+    batch_size: 8           # 保留原 BERT 批次形状；可试验 32，需复核分类器输出。
+    model_root: train/backbone/V554-BERT
+    hidden_layer: -1
+    encoder_layer: 0
+    token_offset: 128
 
   # 新 Diffusion 版本：也可直接指定不同的 encoder 和训练 checkpoint，独立于根目录结构。
   # V012:

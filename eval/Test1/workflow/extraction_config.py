@@ -11,6 +11,7 @@ from common import PROJECT, infer_architecture, read_json, signature, valid_mode
 DEFAULT_CONFIG = Path(__file__).with_name('config.yaml')
 GENERAL = dict(data_dir='eval/Test1/data/step1_out/chr19', out_dir=None,
                output_root='eval/Test1/output', device='auto', cpu_threads=4, batch_size=4,
+               codec_batch_size=1, codec_buffer_size=1024, pooling_device='cpu',
                dtype='float16', window_size=15, preprocess='none', save_every=512, log_every=1000, limit=None)
 FAMILY_DEFAULTS = {
     'diffusion': dict(encoder_layer=0, hidden_source='ode_hidden', ode_steps=1, ode_start_t=.97,
@@ -123,12 +124,14 @@ def resolve(args):
 
 
 def validate(s):
-    for key in ['batch_size', 'cpu_threads', 'window_size', 'save_every']:
+    for key in ['batch_size', 'cpu_threads', 'window_size', 'save_every', 'codec_batch_size', 'codec_buffer_size']:
         if type(s[key]) is not int or s[key] < 1:
             raise ValueError(f'{key} must be a positive integer')
     for key in ['encoder_layer', 'log_every']:
         if type(s[key]) is not int or s[key] < 0:
             raise ValueError(f'{key} must be a nonnegative integer')
+    if s['pooling_device'] not in ('cpu', 'model'):
+        raise ValueError('pooling_device must be cpu or model')
     if s['window_size']%2 != 1:
         raise ValueError('window_size must be odd')
     if s['limit'] is not None and (type(s['limit']) is not int or s['limit'] < 1):

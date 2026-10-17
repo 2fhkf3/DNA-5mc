@@ -9,6 +9,7 @@ set -euo pipefail
 # 只转发用户显式提供的环境变量，避免 common.sh 的默认值覆盖 YAML 中的设置。
 declare -A step2_overrides=()
 for name in VERSION MODEL_ARCH MODEL_ROOT ENCODER_DIR DECODER_DIR DATA_DIR FEATURES_DIR \
+            CODEC_BATCH_SIZE CODEC_BUFFER_SIZE POOLING_DEVICE \
             DEVICE CPU_THREADS BATCH_SIZE FEATURE_DTYPE WINDOW_SIZE PREPROCESS SAVE_EVERY LOG_EVERY LIMIT \
             ENCODER_LAYER HIDDEN_LAYER TOKEN_OFFSET HIDDEN_SOURCE ODE_STEPS ODE_START_T \
             ODE_SELF_COND_CFG_SCALE LAST_T DECODER_LAYERS SELECTED_LAYER_NAME TOKEN_ID_MODE \
@@ -42,6 +43,11 @@ append_override FEATURES_DIR --out-dir
 append_override DEVICE --device
 append_override CPU_THREADS --cpu-threads
 append_override BATCH_SIZE --batch-size
+# CODEC_BATCH_SIZE：等长信号编码批次；1 恢复逐条编码。
+# CODEC_BUFFER_SIZE：分组缓冲的窗口数；POOLING_DEVICE：cpu / model。
+append_override CODEC_BATCH_SIZE --codec-batch-size
+append_override CODEC_BUFFER_SIZE --codec-buffer-size
+append_override POOLING_DEVICE --pooling-device
 append_override FEATURE_DTYPE --dtype
 append_override WINDOW_SIZE --window-size
 append_override PREPROCESS --preprocess

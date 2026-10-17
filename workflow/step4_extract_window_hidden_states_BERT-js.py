@@ -33,6 +33,7 @@ import gzip
 import json
 import math
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Sequence, TextIO
@@ -45,6 +46,13 @@ from transformers import AutoFeatureExtractor, AutoModel, AutoModelForMaskedLM
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
+# Shared performance options live in the existing Test1 common module.
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from eval.Test1.workflow.common import (
+    add_extraction_performance_args, validate_extraction_performance,
+    extraction_performance_metadata, iter_encoded_signals, pool_hidden_on_model,
+)
 DEFAULT_MODEL_ROOT = PROJECT_ROOT / "train" / "backbone" / "V554-BERT"
 DEFAULT_DATA_DIR = PROJECT_ROOT / "output" / "step3_output" / "new"
 DEFAULT_OUT_DIR = PROJECT_ROOT / "output" / "step4_output" / "V554"
@@ -135,10 +143,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--log-every", type=int, default=1000)
+    add_extraction_performance_args(parser)
     return parser.parse_args()
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    validate_extraction_performance(args)
     for path, label in (
         (args.data_dir, "data directory"),
         (args.encoder_dir, "V548 encoder"),
@@ -318,8 +328,9 @@ def encode_sample(
     max_positions: int,
     vocab_size: int,
     device: torch.device,
+    raw_ids: torch.Tensor | None = None,
 ) -> EncodedSample:
-    token_ids = encode_tokens_without_reconstruction(
+    token_ids = raw_ids if raw_ids is not None else encode_tokens_without_reconstruction(
         codec, signal, encoder_layer, device
     )
     if token_ids.ndim != 1 or token_ids.numel() == 0:
@@ -368,6 +379,7 @@ def infer_bert_batch(
     bert_mlm: torch.nn.Module,
     hidden_layer: int,
     device: torch.device,
+    pooling_device: str = "cpu",
 ) -> list[torch.Tensor]:
     sequences = [add_special_tokens(item.token_ids) for item in items]
     lengths = torch.tensor([seq.numel() for seq in sequences], dtype=torch.long)
@@ -397,6 +409,11 @@ def infer_bert_batch(
             f"{len(hidden_states)} hidden states"
         ) from exc
 
+    if pooling_device == "model":
+        intervals = [[span_to_token_interval(span, item.signal_len, item.token_len)
+                      for span in item.spans] for item in items]
+        return pool_hidden_on_model(selected, intervals, offset=2)
+
     arrays: list[torch.Tensor] = []
     for row_index, item in enumerate(items):
         # 0=CLS, 1=BOS, then signal tokens; EOS and batch padding are excluded.
@@ -414,24 +431,25 @@ def infer_with_oom_fallback(
     bert_mlm: torch.nn.Module,
     hidden_layer: int,
     device: torch.device,
+    pooling_device: str = "cpu",
 ) -> list[torch.Tensor]:
     try:
-        return infer_bert_batch(items, bert_mlm, hidden_layer, device)
+        return infer_bert_batch(items, bert_mlm, hidden_layer, device, pooling_device)
     except torch.cuda.OutOfMemoryError:
         if device.type != "cuda" or len(items) == 1:
             raise
-        torch.cuda.empty_cache()
-        midpoint = len(items) // 2
-        print(
-            f"[WARN] CUDA OOM for batch={len(items)}; retrying as "
-            f"{midpoint}+{len(items) - midpoint}",
-            flush=True,
-        )
-        return infer_with_oom_fallback(
-            items[:midpoint], bert_mlm, hidden_layer, device
-        ) + infer_with_oom_fallback(
-            items[midpoint:], bert_mlm, hidden_layer, device
-        )
+    torch.cuda.empty_cache()
+    midpoint = len(items) // 2
+    print(
+        f"[WARN] CUDA OOM for batch={len(items)}; retrying as "
+        f"{midpoint}+{len(items) - midpoint}",
+        flush=True,
+    )
+    return infer_with_oom_fallback(
+        items[:midpoint], bert_mlm, hidden_layer, device, pooling_device
+    ) + infer_with_oom_fallback(
+        items[midpoint:], bert_mlm, hidden_layer, device, pooling_device
+    )
 
 
 def span_to_token_interval(
@@ -672,7 +690,7 @@ def build_split(
         if not pending:
             return
         hidden_arrays = infer_with_oom_fallback(
-            pending, bert_mlm, args.hidden_layer, device
+            pending, bert_mlm, args.hidden_layer, device, getattr(args, "pooling_device", "cpu")
         )
         for item, hidden in zip(pending, hidden_arrays):
             try:
@@ -683,27 +701,34 @@ def build_split(
                     f"label={item.source.get('label')!r}"
                 ) from exc
             writer.append(
-                hidden_to_base_window(hidden, item),
+                hidden.numpy() if getattr(args, "pooling_device", "cpu") == "model" else hidden_to_base_window(hidden, item),
                 label,
                 sample_metadata(item, split),
             )
         pending = []
 
+    def prepared_records():
+        nonlocal seen, skipped
+        for line_no, sample in iter_jsonl(input_path, args.limit):
+            seen += 1
+            signal = prepare_signal(sample, preprocessor, input_path, line_no)
+            if signal is None:
+                skipped += 1
+                continue
+            spans = normalize_spans(
+                sample, int(signal.numel()), args.window_size, input_path, line_no
+            )
+            if spans is None:
+                skipped += 1
+                continue
+            yield line_no, sample, signal, spans
+
     print(f"[INFO] split={split} input={input_path}", flush=True)
     try:
         with torch.inference_mode():
-            for line_no, sample in iter_jsonl(input_path, args.limit):
-                seen += 1
-                signal = prepare_signal(sample, preprocessor, input_path, line_no)
-                if signal is None:
-                    skipped += 1
-                    continue
-                spans = normalize_spans(
-                    sample, int(signal.numel()), args.window_size, input_path, line_no
-                )
-                if spans is None:
-                    skipped += 1
-                    continue
+            for (line_no, sample, signal, spans), raw_ids in iter_encoded_signals(
+                    prepared_records(), codec, args, device,
+                    lambda signal: encode_tokens_without_reconstruction(codec, signal, args.encoder_layer, device)):
                 item = encode_sample(
                     sample=sample,
                     signal=signal,
@@ -713,13 +738,13 @@ def build_split(
                     token_offset=args.token_offset,
                     max_positions=max_positions,
                     vocab_size=vocab_size,
-                    device=device,
+                    device=device, raw_ids=raw_ids,
                 )
                 truncated += int(item.was_truncated)
                 pending.append(item)
                 if len(pending) >= args.batch_size:
                     flush_batch()
-                if args.log_every > 0 and seen % args.log_every == 0:
+                if args.log_every > 0 and line_no % args.log_every == 0:
                     print(
                         f"[INFO] split={split} seen={seen} kept={writer.records} "
                         f"pending={len(pending)} disk_buffer={writer.buffered} "
@@ -735,6 +760,7 @@ def build_split(
         raise
 
     return {
+        **extraction_performance_metadata(args),
         "split": split,
         "records": writer.records,
         "skipped": skipped,

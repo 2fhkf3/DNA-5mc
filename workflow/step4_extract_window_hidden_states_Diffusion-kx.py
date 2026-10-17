@@ -29,6 +29,13 @@ from transformers import AutoConfig, AutoFeatureExtractor, AutoModel
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
+# Shared performance options live in the existing Test1 common module.
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from eval.Test1.workflow.common import (
+    add_extraction_performance_args, validate_extraction_performance,
+    extraction_performance_metadata, iter_encoded_signals, pool_hidden_on_model,
+)
 DEFAULT_MODEL_ROOT = PROJECT_ROOT / 'train/backbone/V011-Diffusion'
 DEFAULT_DATA_DIR = PROJECT_ROOT / 'output/step3_output/new'
 DEFAULT_OUT_DIR = PROJECT_ROOT / 'output/step4_output/V011-ode097'
@@ -183,6 +190,9 @@ def infer_dlm_batch(items, dlm, args, protocol, device) -> list[np.ndarray]:
         selected = dlm(input_ids=ids, attention_mask=mask, t=time)['last_hidden_state']
     if selected.shape != (len(items), ids.shape[1], protocol.hidden_size):
         raise RuntimeError(f'Unexpected DLM feature shape: {tuple(selected.shape)}')
+    if getattr(args, 'pooling_device', 'cpu') == 'model':
+        pooled = pool_hidden_on_model(selected, [base_token_intervals(item) for item in items], offset=2)
+        return [row.numpy() for row in pooled]
     dtype = torch.float16 if args.hidden_dtype == 'float16' else torch.float32
     arrays = []
     for row, item in enumerate(items):
@@ -198,11 +208,11 @@ def infer_with_oom_fallback(items, dlm, args, protocol, device):
     except torch.cuda.OutOfMemoryError:
         if device.type != 'cuda' or len(items) == 1:
             raise
-        torch.cuda.empty_cache()
-        midpoint = len(items) // 2
-        print(f'[WARN] CUDA OOM: splitting batch {len(items)} into {midpoint}+{len(items)-midpoint}', flush=True)
-        return (infer_with_oom_fallback(items[:midpoint], dlm, args, protocol, device)
-                + infer_with_oom_fallback(items[midpoint:], dlm, args, protocol, device))
+    torch.cuda.empty_cache()
+    midpoint = len(items) // 2
+    print(f'[WARN] CUDA OOM: splitting batch {len(items)} into {midpoint}+{len(items)-midpoint}', flush=True)
+    return (infer_with_oom_fallback(items[:midpoint], dlm, args, protocol, device)
+            + infer_with_oom_fallback(items[midpoint:], dlm, args, protocol, device))
 
 def atomic_dump(value, path: Path, *, as_json=False):
     temporary = path.with_suffix(path.suffix + '.tmp')
@@ -523,10 +533,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--splits', nargs='+', choices=['train', 'valid', 'test'],
                         default=['train', 'valid', 'test'])
     parser.add_argument('--force', action='store_true', help='Replace selected splits in --out-dir.')
+    add_extraction_performance_args(parser)
     return parser.parse_args()
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    validate_extraction_performance(args)
     for path, label in ((args.encoder_dir, 'V011 encoder'), (args.decoder_dir, 'V011 ELF DLM')):
         for filename in ('config.json', 'model.safetensors'):
             if not (path / filename).is_file():
@@ -560,12 +572,12 @@ def inference_args(args: argparse.Namespace) -> SimpleNamespace:
         encoding_type='last_hidden' if args.hidden_source == 'last_hidden_state' else args.hidden_source,
         ode_steps=args.ode_steps, ode_start_t=args.ode_start_t,
         ode_self_cond_cfg_scale=args.ode_self_cond_cfg_scale,
-        last_t=args.last_t, hidden_dtype='float32',
+        last_t=args.last_t, hidden_dtype='float32', pooling_device=getattr(args, 'pooling_device', 'cpu'),
     )
 
 
-def encode_sample(sample, signal, spans, encoder, encoder_layer, protocol, device) -> EncodedSample:
-    ids = encode_tokens_without_reconstruction(encoder, signal, encoder_layer, device)
+def encode_sample(sample, signal, spans, encoder, encoder_layer, protocol, device, raw_ids=None) -> EncodedSample:
+    ids = raw_ids if raw_ids is not None else encode_tokens_without_reconstruction(encoder, signal, encoder_layer, device)
     if ids.ndim != 1 or not ids.numel() or ids.min() < 0 or ids.max() >= protocol.lookup.numel():
         raise ValueError(f'Invalid V011 raw codec tokens for read_id={sample.get("read_id")}')
     original_len = ids.numel()
@@ -613,6 +625,7 @@ def feature_source(args) -> str:
 
 def extraction_metadata(args, protocol) -> dict[str, Any]:
     return {
+        **extraction_performance_metadata(args),
         'model_family': 'V011_PoreDLM', 'encoder_dir': str(args.encoder_dir.resolve()),
         'decoder_dir': str(args.decoder_dir.resolve()), 'encoder_layer': args.encoder_layer,
         'embedding_reference': 'ModificationDetectionBenchmark/workflow/hidden-stage/hidden-stage.py',
@@ -667,28 +680,36 @@ def build_split(split, encoder, decoder, preprocessor, args, device, protocol) -
         arrays = infer_batch(pending, decoder, args, protocol, device)
         for item, hidden in zip(pending, arrays):
             label = int(item.source['label'])
-            writer.append(hidden_to_base_window(hidden, item), label, sample_metadata(item, split))
+            feature = hidden.numpy() if getattr(args, 'pooling_device', 'cpu') == 'model' else hidden_to_base_window(hidden, item)
+            writer.append(feature, label, sample_metadata(item, split))
             labels[label] += 1
         pending.clear()
+
+    def prepared_records():
+        nonlocal seen, skipped
+        for line_no, sample in iter_jsonl(input_path, args.limit):
+            seen += 1
+            if not isinstance(sample, dict):
+                raise ValueError(f'Expected JSON object at {input_path}:{line_no}')
+            if sample.get('label') not in (0, 1, '0', '1'):
+                raise ValueError(f'Binary label required at {input_path}:{line_no}')
+            signal = prepare_signal(sample, preprocessor, input_path, line_no)
+            if signal is None:
+                skipped += 1
+                continue
+            spans = normalize_spans(sample, signal.numel(), args.window_size, input_path, line_no)
+            if spans is None:
+                skipped += 1
+                continue
+            yield line_no, sample, signal, spans
 
     print(f'[INFO] split={split} input={input_path}', flush=True)
     try:
         with torch.inference_mode():
-            for line_no, sample in iter_jsonl(input_path, args.limit):
-                seen += 1
-                if not isinstance(sample, dict):
-                    raise ValueError(f'Expected JSON object at {input_path}:{line_no}')
-                if sample.get('label') not in (0, 1, '0', '1'):
-                    raise ValueError(f'Binary label required at {input_path}:{line_no}')
-                signal = prepare_signal(sample, preprocessor, input_path, line_no)
-                if signal is None:
-                    skipped += 1
-                    continue
-                spans = normalize_spans(sample, signal.numel(), args.window_size, input_path, line_no)
-                if spans is None:
-                    skipped += 1
-                    continue
-                item = encode_sample(sample, signal, spans, encoder, args.encoder_layer, protocol, device)
+            for (line_no, sample, signal, spans), raw_ids in iter_encoded_signals(
+                    prepared_records(), encoder, args, device,
+                    lambda signal: encode_tokens_without_reconstruction(encoder, signal, args.encoder_layer, device)):
+                item = encode_sample(sample, signal, spans, encoder, args.encoder_layer, protocol, device, raw_ids)
                 truncated += int(item.was_truncated)
                 if base_token_intervals(item) is None:
                     skipped += 1
@@ -697,7 +718,7 @@ def build_split(split, encoder, decoder, preprocessor, args, device, protocol) -
                 pending.append(item)
                 if len(pending) >= args.batch_size:
                     flush_batch()
-                if args.log_every and seen % args.log_every == 0:
+                if args.log_every and line_no % args.log_every == 0:
                     print(f'[INFO] split={split} seen={seen} kept={writer.records} '
                           f'pending={len(pending)} skipped={skipped} truncated={truncated}', flush=True)
             flush_batch()

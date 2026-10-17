@@ -84,7 +84,65 @@ EXTRACTION_CONFIG=/path/to/experiment.yaml \
 
 优先级为：**追加的命令行参数 > 显式环境变量 > YAML 模型条目/通用设置 > 架构默认值**。启动器不会用 `common.sh` 中自动补齐的默认值覆盖 YAML。最终配置同时保存在 `resolved_extraction_config.json` 和 `feature_summary.json` 中，便于复核实际用的权重路径、层和参数。
 
+## Step2 推理优化配置
+
+性能选项直接放在现有 `config.yaml` 的 `extraction` 下，也可在 `models.<名称>` 中覆盖。
+没有增加新的提取脚本，三类原提取器复用现有 `common.py` 中的性能辅助函数。
+
+```yaml
+extraction:
+  batch_size: 32
+  codec_batch_size: 1
+  codec_buffer_size: 1024
+  pooling_device: model
+```
+
+| 参数 | 作用和选择 |
+| --- | --- |
+| `batch_size` | 主干推理批次。Diffusion/GPT 当前设为 32；V543/V554 在各自模型条目覆盖为 8，保留原 BERT 批次形状。显存不足会自动拆小。 |
+| `codec_batch_size` | 默认 1，沿用原逐条 codec 编码。大于 1 时按**完全相同的信号长度**分组批量编码，不补零，随后恢复输入顺序。批量编码会改变卷积数值运算，可能改变离散 token；需作为单独实验验证后使用。 |
+| `codec_buffer_size` | 只有批量 codec 启用时使用，限制暂存的有效窗口数量；末尾不足一批也会处理。当前为 1024，不缓存整套语料。 |
+| `pooling_device` | `model` 在模型设备上按原 span 区间进行 FP32 均值聚合，再一次性传回 `[B,15,H]`；`cpu` 保留原先完整 token 隐藏状态传回 CPU 后逐窗口聚合的路径。模型在 CPU 时，两种模式都可运行。 |
+
+**为什么没有默认打开批量 codec：**扩大到 1024 个真实窗口后，V543 的等长批量 codec（32/1024）有 21 个窗口各出现一个不同 token。定位到卷积批次形状引起的数值差异跨过量化边界，并非信号补零或顺序错误。此前 256 个窗口的测试没有覆盖该现象，不能据此保证全量一致。因此正式对比默认保持 `codec_batch_size: 1`。V543 主干从批次 8 改为 32 时也观察到最大约 0.0844 的特征绝对差异（原 BERT `high` 计算精度），当前 BERT 默认保留 8。
+
+GPU 聚合使用前缀和计算相同区间的均值，浮点求和顺序不同，因此不承诺逐位相同。隐藏层选择、特殊 token、原有主干计算精度、ODE 参数、截断/跳过规则、输出格式和元数据顺序均沿用原协议。`dtype` 仍只控制落盘精度，未启用额外混合精度或调整 TF32 开关。小样本检查不能代替全量下游预测一致性验证。
+
+环境变量可覆盖上述 YAML 设置：
+
+```bash
+# 只预览最终配置，不加载模型或产生特征。
+VERSION=V011 DRY_RUN=1 bash eval/Test1/workflow/step2_extract_features.sh
+
+# 回到原执行方式；命令执行后会启动提取，正式运行时自行调用。
+BATCH_SIZE=8 CODEC_BATCH_SIZE=1 POOLING_DEVICE=cpu \
+  bash eval/Test1/workflow/step2_extract_features.sh
+```
+
+对应 CLI 为 `--codec-batch-size`、`--codec-buffer-size`、`--pooling-device`。原始 `workflow/step4_*.py` 入口也支持这些选项，默认仍为逐条 codec 和 CPU 聚合。
+
+每个任务在启动时解析一次 YAML，并保存 `resolved_extraction_config.json`；运行中修改 YAML 只影响后续任务，不再因此误报 `Dataset changed during feature extraction`。输入窗口、数据清单、审计索引和模型 `config.json` 的文件签名仍会检查，变化时报告具体路径。优化不会替换已存在的正式特征目录，需要另选输出目录；已启动的旧进程也不会自动切换到新实现。
+
+### 本次优化验证（2026-10-17）
+
+A800 80 GB，CUDA 0，4 个 CPU 线程，同一份 WGA 输入的前 1024 个窗口。先预热两条路径，再以优化→原始的顺序计时，包含读取、codec、主干、聚合和临时特征写盘；不包含权重加载和 Step2 的 SQLite 元数据补充。基准为主干批次 8、codec 逐条、CPU 聚合；优化为当前 YAML 的批次设置、codec 逐条、模型设备聚合。数值对照使用 FP32 落盘。
+
+| 模型 | 原始耗时（s） | 优化耗时（s） | 速度比 | 特征最大绝对差异 |
+| --- | ---: | ---: | ---: | ---: |
+| V011 | 6.465 | 4.455 | 1.45× | 4.48e-05 |
+| V543 | 2.998 | 2.758 | 1.09× | 3.05e-05 |
+| V554 | 3.020 | 2.815 | 1.07× | 1.72e-05 |
+| V610 | 4.084 | 3.408 | 1.20× | 1.14e-05 |
+
+四个模型的元数据、样本顺序和标签逐字节一致。上述速度来自单轮小样本对照，受长窗口分布、磁盘和其他 GPU 进程影响，不保证全量倍率，也未验证全量下游分类器预测完全一致。等长批量 codec（32/1024）的单独对照中，V543/V554 各有 21/1024 个窗口 token 不同，V011/V610 各有 14/1024，因此默认关闭。
+
+另外测试了缓冲区尾批和顺序、非有限特征拒绝、模拟 CUDA OOM 拆批、Diffusion 截断跨度检查、GPT 超长窗口 skip/error、配置覆盖与非法参数。测试使用临时目录，未运行正式全量提取。
+
+三类架构还分别通过了 17 个真实窗口的 Bash → Step2 完整入口测试：验证 FP16 特征、审计字段补全、`partial_test` 标记及 Step3 中心裁剪兼容性；启动后修改临时 YAML，任务仍按启动快照正常完成。所有临时特征已自动清理。
+
 ## 只做测试
+
+注意：当前工作区缺少下文历史命令引用的 `test_step2_config.py`，因此 `run_all.sh --test` 暂不可用。本次优化按要求未新增测试脚本，使用隔离的临时测试验证；`DRY_RUN=1` 配置预览仍可直接使用。
 
 默认一键入口只测试，测试数据、日志和缓存位于 `/tmp/dna5mc-test1-*`；成功后自动清理，不生成正式 `output/` 结果：
 
@@ -150,7 +208,10 @@ STRATEGIES="center_base_linear_raw768" \
 | `VERSION` | Step2 采用 YAML 的 `model` | 模型名称，允许新增版本 |
 | `MODEL_ARCH` | 采用 YAML 模型条目 | Step2 架构：diffusion / bert / gpt / auto |
 | `DEVICE` / `CPU_THREADS` | `auto` / `4` | 设备和 CPU 算子线程 |
-| `BATCH_SIZE` | `4` | 主干提取批次 |
+| `BATCH_SIZE` | YAML：Diffusion/GPT 32，BERT 8 | 主干提取批次 |
+| `CODEC_BATCH_SIZE` | YAML：1 | 等长信号编码批次；大于 1 可能改变离散 token |
+| `CODEC_BUFFER_SIZE` | YAML：1024 | codec 分组缓冲窗口数 |
+| `POOLING_DEVICE` | YAML：model | model / cpu，选择均值聚合位置 |
 | `FEATURE_DTYPE` | `float16` | 缓存存储精度 |
 | `CROP_WINDOW` / `CHUNK_SIZE` | `5` / `4096` | 表征裁剪窗口和读写块大小 |
 | `EVAL_BATCH_SIZE` | `2048` | 分类器推理批次 |

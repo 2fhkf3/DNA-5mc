@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from common import PROJECT, module, output_directory, read_json, readonly_db, signature, write_json
+from common import add_extraction_performance_args, PROJECT, module, output_directory, read_json, readonly_db, signature, write_json
 from extraction_config import DEFAULT_CONFIG, resolve, snapshot
 
 
@@ -51,6 +51,8 @@ def parser():
     p.add_argument('--max-tokens', type=int)
     p.add_argument('--overlong-policy', choices=['skip', 'error'])
     p.add_argument('--print-plan', action='store_true', help='仅解析配置并检查模型 config 路径，不加载权重或写输出')
+    add_extraction_performance_args(p)
+    p.set_defaults(codec_batch_size=None, codec_buffer_size=None, pooling_device=None)
     return p
 
 
@@ -64,6 +66,8 @@ def extractor_command(args, data, stage):
                '--window-size', str(args.window_size), '--batch-size', str(args.batch_size),
                '--preprocess', args.preprocess, '--dtype', args.dtype,
                '--save-every', str(args.save_every), '--log-every', str(args.log_every)]
+    for key in ('codec_batch_size', 'codec_buffer_size', 'pooling_device'):
+        command += ['--'+key.replace('_', '-'), str(getattr(args, key))]
     from extraction_config import FAMILY_DEFAULTS
     for key in FAMILY_DEFAULTS[args.architecture]:
         value = getattr(args, key)
@@ -85,9 +89,11 @@ def run(args):
         raise ValueError('Expected all-negative positive-strand data with configured window_size')
     source = data/'test.jsonl.gz'
     signatures = [signature(source), signature(data/'dataset_manifest.json'), signature(data/'sample_audit.sqlite'),
-                  args.config_signature, signature(args.encoder_dir/'config.json'), signature(args.decoder_dir/'config.json')]
+                  signature(args.encoder_dir/'config.json'), signature(args.decoder_dir/'config.json')]
     encoder, decoder = args.encoder_dir, args.decoder_dir
     with output_directory(args.out_dir) as stage:
+        # All runtime options are resolved once; editing YAML affects only future jobs.
+        write_json(stage/'resolved_extraction_config.json', snapshot(args))
         if args.architecture == 'bert':
             import torch
             bert = module('_test1_bert', PROJECT/'workflow/step4_extract_window_hidden_states_BERT-js.py')
@@ -95,7 +101,9 @@ def run(args):
                                       out_dir=stage, device=args.device, encoder_layer=args.encoder_layer,
                                       hidden_layer=args.hidden_layer, token_offset=args.token_offset, window_size=args.window_size,
                                       batch_size=args.batch_size, preprocess=args.preprocess, dtype=args.dtype,
-                                      save_every=args.save_every, limit=args.limit, log_every=args.log_every)
+                                      save_every=args.save_every, limit=args.limit, log_every=args.log_every,
+                                      codec_batch_size=args.codec_batch_size, codec_buffer_size=args.codec_buffer_size,
+                                      pooling_device=args.pooling_device)
             bert.validate_args(opts)
             torch.set_num_threads(args.cpu_threads)
             torch.set_float32_matmul_precision('high')  # Same as the original BERT entry point.
@@ -140,8 +148,9 @@ def run(args):
             audit.close()
         if not count:
             raise ValueError('No extracted features')
-        if [signature(Path(s['path'])) for s in signatures] != signatures:
-            raise ValueError('Dataset changed during feature extraction')
+        changed = [s['path'] for s in signatures if signature(Path(s['path'])) != s]
+        if changed:
+            raise ValueError(f'Dataset or model config changed during feature extraction: {changed}')
         # Relocated manifests use relative bin paths; remove stale staging metadata paths.
         import torch
         pt = torch.load(stage/'test.pt', map_location='cpu', weights_only=False)

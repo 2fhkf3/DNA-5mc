@@ -248,3 +248,130 @@ def summarize(db, table='predictions', prob='prob', read_threshold=.5, site_thre
 def install_sql_math(db):
     # Python SQLite builds need not include ENABLE_MATH_FUNCTIONS.
     db.create_function('ln', 1, math.log, deterministic=True)
+
+
+# Step2 performance helpers shared by the three existing backbone extractors.
+# Torch is imported lazily so statistics/config-only commands stay lightweight.
+def add_extraction_performance_args(parser):
+    parser.add_argument('--codec-batch-size', type=int, default=1,
+                        help='Equal-length signal batch; 1 retains serial codec execution')
+    parser.add_argument('--codec-buffer-size', type=int, default=1024,
+                        help='Maximum prepared windows grouped by exact signal length')
+    parser.add_argument('--pooling-device', choices=['cpu', 'model'], default='cpu',
+                        help='cpu: original pooling; model: FP32 pooling before transfer')
+
+
+def validate_extraction_performance(args):
+    for key in ('codec_batch_size', 'codec_buffer_size'):
+        if type(getattr(args, key, 1)) is not int or getattr(args, key, 1) < 1:
+            raise ValueError(f'{key} must be a positive integer')
+    if getattr(args, 'pooling_device', 'cpu') not in ('cpu', 'model'):
+        raise ValueError('pooling_device must be cpu or model')
+
+
+def extraction_performance_metadata(args):
+    return dict(codec_batch_size=getattr(args, 'codec_batch_size', 1),
+                codec_buffer_size=getattr(args, 'codec_buffer_size', 1024),
+                pooling_device=getattr(args, 'pooling_device', 'cpu'))
+
+
+def iter_encoded_signals(records, codec, args, device, encode_one):
+    """Yield (prepared record, raw CPU IDs), retaining input order and no padding.
+
+    Each record is (line_no, sample, signal, spans). Buffer only a bounded number
+    of signals. OOM retries release failed tensors before splitting the batch.
+    Existing single-signal code remains the reference/disabled path.
+    """
+    import torch
+    from collections import defaultdict
+    batch_size = getattr(args, 'codec_batch_size', 1)
+    buffer_size = getattr(args, 'codec_buffer_size', 1024)
+    validate_extraction_performance(args)
+    if batch_size == 1:
+        for record in records:
+            yield record, encode_one(record[2])
+        return
+    print(f'[WARN] Batched codec enabled (batch={batch_size}, buffer={buffer_size}); '
+          'batch-dependent convolution roundoff can change quantized token IDs. '
+          'Use codec_batch_size=1 for the reference tokenization path.', flush=True)
+    if codec.training:
+        raise ValueError('Batched codec extraction requires eval() mode')
+
+    def encode_group(signals):
+        try:
+            x = torch.stack(signals).to(device=device, dtype=torch.float32).unsqueeze(1)
+            can_skip = all(hasattr(codec, name) for name in
+                           ('pore_head', 'cnn_model', 'project_in', 'vq', 'tokenize_indices'))
+            if getattr(args, 'codec_mode', 'auto') != 'reference' and can_skip:
+                latent = codec.cnn_model.encode(codec.pore_head(x)).permute(0, 2, 1)
+                _, indices = codec.vq(codec.project_in(latent))
+                ids = codec.tokenize_indices(indices.long(), layer=args.encoder_layer)
+            else:
+                ids = codec.encode_signal(x, layer=args.encoder_layer)
+            if ids.ndim != 2 or ids.shape[0] != len(signals) or not ids.shape[1]:
+                raise ValueError(f'Codec must return nonempty [B,K] IDs, got {tuple(ids.shape)}')
+            if ids.is_floating_point() and (not torch.isfinite(ids).all() or not torch.equal(ids, ids.round())):
+                raise ValueError('Codec returned invalid/nonintegral IDs')
+            return list(ids.detach().to(device='cpu', dtype=torch.long).unbind(0))
+        except torch.cuda.OutOfMemoryError:
+            if device.type != 'cuda' or len(signals) == 1:
+                raise
+        # Release references and the exception traceback before recursive retries.
+        x = latent = indices = ids = _ = None
+        torch.cuda.empty_cache()
+        middle = len(signals) // 2
+        print(f'[WARN] CUDA OOM: splitting codec batch of {len(signals)}', flush=True)
+        return encode_group(signals[:middle]) + encode_group(signals[middle:])
+
+    def flush(buffer):
+        groups = defaultdict(list)
+        for index, record in enumerate(buffer):
+            groups[record[2].numel()].append(index)
+        encoded = [None] * len(buffer)
+        for indices in groups.values():
+            for start in range(0, len(indices), batch_size):
+                group = indices[start:start + batch_size]
+                ids = encode_group([buffer[i][2] for i in group])
+                for i, tokens in zip(group, ids):
+                    encoded[i] = tokens
+        yield from zip(buffer, encoded)
+
+    buffer = []
+    for record in records:
+        buffer.append(record)
+        if len(buffer) >= buffer_size:
+            yield from flush(buffer)
+            buffer.clear()
+    if buffer:
+        yield from flush(buffer)
+
+
+def pool_hidden_on_model(hidden, intervals, offset=0):
+    """FP32 interval means on the model device, then one compact CPU transfer.
+
+    Prefix sums preserve interval definitions but may differ from independent
+    CPU means by floating-point summation roundoff. No precision/hidden-layer
+    change is introduced. Check the valid signal region before pooling.
+    """
+    import torch
+    if any(row is None or not row for row in intervals):
+        raise ValueError('Invalid base token intervals')
+    # Bounds are CPU metadata: validate here, avoiding a CUDA synchronization.
+    if any(a + offset < 0 or b <= a or b + offset > hidden.shape[1]
+           for row in intervals for a, b in row):
+        raise ValueError('Base token interval outside hidden states')
+    bounds = torch.tensor(intervals, dtype=torch.long, device=hidden.device) + offset
+    start, end = bounds.unbind(-1)
+    hidden = hidden.detach().float()
+    prefix = torch.cat((torch.zeros_like(hidden[:, :1]), hidden.cumsum(dim=1)), dim=1)
+    shape = (-1, -1, hidden.shape[-1])
+    result = (prefix.gather(1, end[..., None].expand(*shape))
+              - prefix.gather(1, start[..., None].expand(*shape))) / (end-start)[..., None]
+    # Copy the finite flag with the features, rather than synchronizing CUDA
+    # for a Python bool before the transfer. Preserve hidden-state validation.
+    packed = torch.cat((result.flatten(), torch.isfinite(hidden).all().float().reshape(1))).cpu()
+    import numpy as np
+    if not packed[-1].item() or not np.isfinite(packed.numpy()).all():
+        raise ValueError('Non-finite hidden states or pooled features')
+    result = packed[:-1].view(result.shape)
+    return list(result.unbind(0))

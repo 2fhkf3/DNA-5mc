@@ -5,7 +5,8 @@ Read selected {train,valid,test}.jsonl[.gz] windows. Encode each unpadded signal
 map codec IDs through the checkpoint tokenizer, batch the causal decoder and
 pool token features over base_sample_span_ref (or base_sample_span_seq).
 Write streaming_memmap_v1 manifests, feature/label binaries and metadata TSVs.
-JSONL validation and streaming writers are inlined; this file is standalone.
+JSONL validation and streaming writers are inlined; optional performance helpers
+are shared with eval/Test1/workflow/common.py.
 The default GPT token layout has no added CLS/BOS/EOS, matching the old GPT
 extractor; optional BOS/EOS must be explicitly requested for another protocol.
 """
@@ -29,12 +30,19 @@ from typing import Any, BinaryIO, Dict, List, Sequence, TextIO
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
-from transformers import AutoConfig, AutoModel, PreTrainedTokenizerFast
+from transformers import AutoConfig, AutoFeatureExtractor, AutoModel, PreTrainedTokenizerFast
 
 # JSONL validation and streaming output are included below for standalone use.
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
+# Shared performance options live in the existing Test1 common module.
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from eval.Test1.workflow.common import (
+    add_extraction_performance_args, validate_extraction_performance,
+    extraction_performance_metadata, iter_encoded_signals, pool_hidden_on_model,
+)
 DEFAULT_MODEL_ROOT = PROJECT_ROOT / 'train/backbone/V610-GPT'
 DEFAULT_DATA_DIR = PROJECT_ROOT / 'output/step3_output/new'
 DEFAULT_OUT_DIR = PROJECT_ROOT / 'output/step4_output/V610'
@@ -618,8 +626,8 @@ class EncodedSample:
     token_ids: torch.Tensor
 
 
-def encode_sample(sample, signal, spans, encoder, args, protocol, device):
-    raw = encode_tokens_without_reconstruction(encoder, signal, args.encoder_layer, device, args.codec_mode)
+def encode_sample(sample, signal, spans, encoder, args, protocol, device, raw_ids=None):
+    raw = raw_ids if raw_ids is not None else encode_tokens_without_reconstruction(encoder, signal, args.encoder_layer, device, args.codec_mode)
     if int(raw.min()) < 0 or int(raw.max()) >= len(protocol.lookup):
         raise ValueError(f'Codec token outside configured codebook; read_id={sample.get("read_id")}')
     overhead = 2 if protocol.special_tokens == 'bos_eos' else 0
@@ -631,7 +639,7 @@ def encode_sample(sample, signal, spans, encoder, args, protocol, device):
     return EncodedSample(sample, spans, signal.numel(), protocol.lookup[raw].contiguous())
 
 
-def infer_batch(items, decoder, protocol, device):
+def infer_batch(items, decoder, protocol, device, pooling_device='cpu'):
     sequences = [item.token_ids for item in items]
     offset = 0
     if protocol.special_tokens == 'bos_eos':
@@ -648,15 +656,19 @@ def infer_batch(items, decoder, protocol, device):
     hidden = output.last_hidden_state if last else output.hidden_states[protocol.layer_index]
     if hidden.shape != (len(items), ids.shape[1], protocol.hidden_size):
         raise ValueError(f'Unexpected decoder hidden shape: {tuple(hidden.shape)}')
+    if pooling_device == 'model':
+        intervals = [[span_to_token_interval(span, item.signal_len, len(item.token_ids))
+                      for span in item.spans] for item in items]
+        return pool_hidden_on_model(hidden, intervals, offset=offset)
     if not torch.isfinite(hidden).all():
         raise ValueError('Decoder returned non-finite hidden states')
     return [hidden[i, offset:offset+len(item.token_ids)].detach().to(device='cpu', dtype=torch.float32)
             for i, item in enumerate(items)]
 
 
-def infer_with_oom_fallback(items, decoder, protocol, device):
+def infer_with_oom_fallback(items, decoder, protocol, device, pooling_device='cpu'):
     try:
-        return infer_batch(items, decoder, protocol, device)
+        return infer_batch(items, decoder, protocol, device, pooling_device)
     except torch.cuda.OutOfMemoryError:
         if device.type != 'cuda' or len(items) <= 1:
             raise
@@ -664,8 +676,8 @@ def infer_with_oom_fallback(items, decoder, protocol, device):
     # Leave the except block before retrying, releasing the failed traceback.
     torch.cuda.empty_cache()
     mid = len(items) // 2
-    return (infer_with_oom_fallback(items[:mid], decoder, protocol, device)
-            + infer_with_oom_fallback(items[mid:], decoder, protocol, device))
+    return (infer_with_oom_fallback(items[:mid], decoder, protocol, device, pooling_device)
+            + infer_with_oom_fallback(items[mid:], decoder, protocol, device, pooling_device))
 
 
 def hidden_to_base_window(hidden, item):
@@ -687,7 +699,7 @@ def feature_source(args, protocol):
 
 
 def extraction_metadata(args, protocol):
-    return dict(model_family='GPT_OLMo', encoder_dir=str(args.encoder_dir.resolve()),
+    return dict(**extraction_performance_metadata(args), model_family='GPT_OLMo', encoder_dir=str(args.encoder_dir.resolve()),
                 decoder_dir=str(args.decoder_dir.resolve()), encoder_layer=args.encoder_layer,
                 decoder_layers=args.decoder_layers, token_id_mode=args.token_id_mode,
                 tokenizer_file=str(Path(args.tokenizer_file).resolve()) if args.tokenizer_file else str((args.decoder_dir/'tokenizer.json').resolve()),
@@ -734,41 +746,49 @@ def build_split(split, encoder, decoder, preprocessor, args, device, protocol):
     def flush_batch():
         if not pending:
             return
-        arrays = infer_with_oom_fallback(pending, decoder, protocol, device)
+        arrays = infer_with_oom_fallback(pending, decoder, protocol, device, getattr(args, 'pooling_device', 'cpu'))
         if len(arrays) != len(pending):
             raise RuntimeError('Decoder batch output count mismatch')
         for item, hidden in zip(pending, arrays):
             label = int(item.source['label'])
-            writer.append(hidden_to_base_window(hidden, item), label, sample_metadata(item, split))
+            feature = hidden.numpy() if getattr(args, 'pooling_device', 'cpu') == 'model' else hidden_to_base_window(hidden, item)
+            writer.append(feature, label, sample_metadata(item, split))
             labels[label] += 1
         pending.clear()
+
+    def prepared_records():
+        nonlocal seen, skipped
+        for line_no, sample in iter_jsonl(input_path, args.limit):
+            seen += 1
+            if args.log_every and seen % args.log_every == 0:
+                print(f'[INFO] split={split} seen={seen} kept={writer.records} '
+                      f'pending={len(pending)} skipped={skipped}', flush=True)
+            if sample.get('label') not in (0, 1, '0', '1'):
+                raise ValueError(f'Binary label required at {input_path}:{line_no}')
+            if not sample.get('read_id') or not sample.get('chrom') or 'center_genome_pos0' not in sample:
+                raise ValueError(f'Missing read/site identity at {input_path}:{line_no}')
+            if int(sample['center_genome_pos0']) < 0:
+                raise ValueError(f'Invalid genome position at {input_path}:{line_no}')
+            for name in ('ref', 'seq'):
+                if sample.get(name) and (not isinstance(sample[name], str) or len(sample[name]) != args.window_size):
+                    raise ValueError(f'{name} length does not match window at {input_path}:{line_no}')
+            signal = prepare_signal(sample, preprocessor, input_path, line_no)
+            if signal is None:
+                skipped += 1; skipped_reasons['missing_signal'] += 1
+                continue
+            spans = normalize_spans(sample, signal.numel(), args.window_size, input_path, line_no)
+            if spans is None:
+                skipped += 1; skipped_reasons['missing_spans'] += 1
+                continue
+            yield line_no, sample, signal, spans
 
     print(f'[INFO] split={split} input={input_path}', flush=True)
     try:
         with torch.inference_mode():
-            for line_no, sample in iter_jsonl(input_path, args.limit):
-                seen += 1
-                if args.log_every and seen % args.log_every == 0:
-                    print(f'[INFO] split={split} seen={seen} kept={writer.records} '
-                          f'pending={len(pending)} skipped={skipped}', flush=True)
-                if sample.get('label') not in (0, 1, '0', '1'):
-                    raise ValueError(f'Binary label required at {input_path}:{line_no}')
-                if not sample.get('read_id') or not sample.get('chrom') or 'center_genome_pos0' not in sample:
-                    raise ValueError(f'Missing read/site identity at {input_path}:{line_no}')
-                if int(sample['center_genome_pos0']) < 0:
-                    raise ValueError(f'Invalid genome position at {input_path}:{line_no}')
-                for name in ('ref', 'seq'):
-                    if sample.get(name) and (not isinstance(sample[name], str) or len(sample[name]) != args.window_size):
-                        raise ValueError(f'{name} length does not match window at {input_path}:{line_no}')
-                signal = prepare_signal(sample, preprocessor, input_path, line_no)
-                if signal is None:
-                    skipped += 1; skipped_reasons['missing_signal'] += 1
-                    continue
-                spans = normalize_spans(sample, signal.numel(), args.window_size, input_path, line_no)
-                if spans is None:
-                    skipped += 1; skipped_reasons['missing_spans'] += 1
-                    continue
-                item = encode_sample(sample, signal, spans, encoder, args, protocol, device)
+            for (line_no, sample, signal, spans), raw_ids in iter_encoded_signals(
+                    prepared_records(), encoder, args, device,
+                    lambda signal: encode_tokens_without_reconstruction(encoder, signal, args.encoder_layer, device, args.codec_mode)):
+                item = encode_sample(sample, signal, spans, encoder, args, protocol, device, raw_ids)
                 if item is None:
                     skipped += 1; overlong += 1; skipped_reasons['decoder_context_limit'] += 1
                     continue
@@ -822,10 +842,12 @@ def parse_args(argv=None):
     parser.add_argument('--overlong-policy', choices=['skip', 'error'], default='skip')
     parser.add_argument('--splits', nargs='+', choices=['train', 'valid', 'test'], default=['train', 'valid', 'test'])
     parser.add_argument('--force', action='store_true', help='Replace only selected split outputs and feature_summary.json')
+    add_extraction_performance_args(parser)
     return parser.parse_args(argv)
 
 
 def validate_args(args):
+    validate_extraction_performance(args)
     for name in ('window_size', 'batch_size', 'save_every', 'cpu_threads'):
         if getattr(args, name) < 1:
             raise ValueError(f'--{name.replace("_", "-")} must be positive')
