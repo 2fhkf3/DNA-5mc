@@ -1,0 +1,49 @@
+# Test3：固定 chr16 共同位点上的 5/10/20 reads/site 鲁棒性。各参数运行后冻结，不可中途修改。
+protocol_id: chr16_common_cov20_v1 # 实验版本；更换模型/抽样/平衡策略时建立新协议
+output_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test3/output/chr16_common_cov20_v1 # 所有步骤共同根目录
+enabled_versions: [V011, V543, V554, V610] # 启用模型；未来新版本添加 models 条目后加入此列表
+library_id: NATIVE_250F500490011 # 真实天然文库 ID，同文库跨模型保持一致
+chromosome: chr16               # 原始 test 染色体，不读 train/valid
+strand: '+'                    # 当前模型沿用正链协议
+reference_validation_status: unverified # 继承 BED=0/100 标签，不宣称逐 read 实验真值
+strategies: []                 # 空列表=全部已完成分类头；各模型必须有相同策略集合
+training_seeds: []             # 空列表=全部已完成 seed，支持 1/2/3、4/5/6 等，不按成绩挑 seed
+prediction_source: saved       # saved：复用旧 test_predictions.tsv；inference：从 test 缓存完整推理一次
+device: auto                   # 仅 inference 使用，auto/cpu/cuda:0/cuda:1；saved 无需 GPU
+batch_size: 2048               # 仅 inference 的分类头推理批次，限制显存/内存
+cpu_threads: 4                 # CPU 算子及 BLAS 线程数，不改变抽样清单
+minimum_common_reads: 20        # 所有纳入主干/分类头/seed 的共同 read 池至少有多少条
+depths: [5, 10, 20]            # 每个位点恰抽多少条不同 read，必须递增且不超过共同覆盖下限
+repeats: 50                    # 下采样次数，属于同一数据的技术重复，不是生物重复
+sampling_seed: 20261018        # read 排名种子，与训练 seed、bootstrap seed 分开
+site_balance: none             # none：保留全部合格位点；equal：一次固定抽取等量正负位点作为补充实验
+balance_seed: 20261019         # equal 模式选择位点的 seed；所有深度/模型共用选中位点
+site_threshold: 0.5            # 位点平均正类概率>=该值判阳性；禁止在 Test3 上分深度调参
+site_chunk_size: 4096          # Step3 每块处理的位点数；不影响确定性抽样
+save_all_site_scores: false    # 是否另存 [重复,深度,位点] float64 分数，60 runs 约需7.5GB以上
+save_site_stability: true      # 是否输出每个位点/深度的分数SD、调用波动和错误频率 TSV.gz
+allow_partial_results: false   # 仅临时联调设 true；正式流程拒绝限量数据
+bootstrap:
+  block_size_bp: 1000000       # 基因组空间区块宽度 bp，所有模型/深度共享区块
+  repeats: 1000                # 配对区块 bootstrap 次数；联调可为0禁用
+  seed: 42                    # 重采样 seed，与 read 抽样 seed 分开
+  metrics: [balanced_accuracy, fpr, fnr] # 只允许区块混淆计数可重算的指标，不平均区块AUROC/AP
+plots:
+  enabled: true               # Step5 输出 PNG/PDF 性能曲线；只画已有结果，不训练/推理
+models:
+  V011:
+    architecture: diffusion   # 用于验证原缓存主干类型
+    feature_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V011-V2 # test.pt/bin/metadata/summary
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V011-v2 # experiment 或 runs 目录
+  V543:
+    architecture: bert
+    feature_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V543-V2
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V543-v2
+  V554:
+    architecture: bert
+    feature_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V554-V2
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V554-v2
+  V610:
+    architecture: gpt
+    feature_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V610-V2
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V610-v2

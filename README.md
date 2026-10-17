@@ -1,6 +1,6 @@
 # DNA-5mC
 
-基于 Nanopore 电流信号预训练表征的 DNA 5mC 检测项目，包含数据构建、BERT / Diffusion / GPT 特征提取、分类头训练，以及 WGA UNMOD 阴性对照评测。
+基于 Nanopore 电流信号预训练表征的 DNA 5mC 检测项目，包含数据构建、BERT / Diffusion / GPT 特征提取、分类头训练，以及假阳性、假阴性和位点覆盖度鲁棒性评测。
 
 **主干模型负责提取特征，训练阶段只更新分类头。** 本项目从已有的比对 JSONL 开始，不包含从 POD5/FAST5 到比对 JSONL 的完整 basecalling 流程。模型权重、原始数据、特征和实验结果需要单独准备。
 
@@ -13,9 +13,21 @@
   → encoder + BERT / Diffusion / GPT → [N, 15, H] 特征
   → 中心裁剪，例如 [N, 5, H] → 分类头训练 → read/window 与 site 指标
 
-外部阴性对照（eval/Test1）
+Test1：假阳性
 已预处理的 WGA UNMOD JSONL
   → 全阴性窗口 → 对应主干特征 → 已训练分类头 → 假阳性率及分层统计
+原天然 chr16 test 的 label=0 特征
+  → Step1.1 同步筛选缓存 → 已训练分类头 → 天然参考阴性假阳性率
+
+Test2：假阴性
+原天然 chr16 test 的逐窗口预测
+  → 选择 label=1 → read/window 与 site 漏检率 → 共同集合及 seed 比较
+
+Test3：Coverage 鲁棒性
+原天然 chr16 test 的完整正负预测
+  → 固定共同 read 池和 coverage≥20 的位点
+  → 共享嵌套抽取 5 / 10 / 20 reads per site
+  → site 性能、低覆盖损失、抽样稳定性及模型比较
 ```
 
 ## 从哪里开始
@@ -25,10 +37,24 @@
 | 已有窗口 JSONL，提取主干特征 | [统一 Step4 配置](workflow/config/step4_config.yaml)、[提取与训练示例](#快速开始提取裁剪与训练) |
 | 已有完整 Step4 特征，开始训练 | [中心裁剪与训练](#中心裁剪与训练) |
 | 从全 read JSONL 和 bedMethyl 构建数据集 | [数据构建](#数据构建step1step3) |
-| 用 WGA UNMOD 检查假阳性 | [Test1 阴性评测](#test1wga-unmod-假阳性评测) |
+| 用 WGA UNMOD 或天然 label=0 检查假阳性 | [Test1 假阳性评测](#test1) |
+| 用天然 label=1 检查漏检 | [Test2 假阴性评测](#test2) |
+| 在相同位点比较 5 / 10 / 20 条 read 的表现 | [Test3 Coverage 鲁棒性](#test3) |
 | 查找参数、输出或故障原因 | [配置与路径约定](#配置与路径约定)、[输出与指标](#输出与指标)、[常见问题](#常见问题) |
 
-本文命令在项目根目录执行；`/path/to/...` 需替换为实际路径。正式命令会处理数据，带 `DRY_RUN=1` 的命令用于预览。
+本文命令在项目根目录执行；`/path/to/...` 需替换为实际路径。正式命令会处理数据；`DRY_RUN=1`、`--dry-run` 或 `--print-plan` 按各入口约定用于只读计划。Test2/Test3 优先复用训练时保存的概率，无需再次提取主干特征。
+
+## 评测任务对照
+
+| 任务 | 数据来源与标签 | 主要指标 | 说明 |
+| --- | --- | --- | --- |
+| 常规 test | 原天然 chr16，label=0/1 | Read/window、site 的 Acc、F1、AUROC、AP | 使用 valid 选择的检查点 |
+| Test1：WGA | 独立 WGA UNMOD，全部 label=0 | FPR、Specificity | 阴性窗口无需 bedMethyl |
+| Test1：天然阴性 | 原 chr16 test 的 label=0 | FPR、Specificity | 继承原参考阴性标签 |
+| Test2：天然阳性 | 原 chr16 test 的 label=1 | FNR、Recall/TPR | 原测试集阳性子集补充分析 |
+| Test3：覆盖度 | 原 chr16 test 的正负共同位点 | Site AUROC、AP、BA、F1、FPR/FNR及稳定性 | 同位点、同标签、同抽样清单比较 |
+
+天然数据的 label=0/1 来自原 BED=0%/100% 筛选，不能仅凭标签推断逐分子实验真值；来源未独立核实时记录为 `unverified`。单类别的 Test1/Test2 不用于报告完整二分类 AUROC/AP。WGA FPR 与天然 FNR 属于不同条件，应并列报告，不能直接拼接成同一总体的混淆矩阵。
 
 ## 目录结构
 
@@ -56,10 +82,19 @@ DNA-5mC/
 │   ├── data/                             # 裁剪后的训练特征
 │   └── output/                           # 分类头权重与实验结果
 ├── eval/Test1/
-│   ├── README.md                         # WGA 阴性评测方案
-│   ├── workflow/                         # 阴性数据构建、提取和评测脚本
+│   ├── README.md                         # WGA 与天然参考阴性假阳性方案
+│   ├── workflow/                         # WGA 流程及 Step1.1 天然阴性筛选
 │   ├── data/                             # 阴性窗口与特征
 │   └── output/                           # 假阳性评测结果
+├── eval/Test2/
+│   ├── README.md                         # 天然 chr16 参考阳性假阴性方案
+│   ├── workflow/                         # config.yaml、Step1/2/3、run_all.sh
+│   ├── data/                             # 可选：筛选后的阳性缓存
+│   └── output/                           # FNR、分层与共同集合比较
+├── eval/Test3/
+│   ├── README.md                         # 5/10/20 reads per site 方案
+│   ├── workflow/                         # config.yaml、Step1–5、测试及一键入口
+│   └── output/<protocol_id>/             # 冻结配置、共同池、抽样、指标与图形
 ├── docs/assets/                          # 文档图片
 └── output/
     ├── .hf_modules/                      # Hugging Face 自定义模型代码缓存
@@ -70,7 +105,7 @@ DNA-5mC/
 
 ## 环境与模型准备
 
-已验证的主要运行环境为 Python 3.10、PyTorch 2.6.0、Transformers 4.48.3 和 NumPy 1.26.4；还需要 PyYAML、safetensors 及各模型自定义代码依赖。W&B 仅在启用实验记录时需要安装。
+已验证的主要运行环境为 Python 3.10、PyTorch 2.6.0、Transformers 4.48.3 和 NumPy 1.26.4；还需要 PyYAML、safetensors 及各模型自定义代码依赖。W&B 仅在启用实验记录时需要安装。Test3 图形导出需要 matplotlib，自动测试额外使用 scikit-learn 交叉核对指标；SQLite 来自 Python 标准库。
 
 ```bash
 # 在包含项目依赖的 Python / Conda 环境中执行。
@@ -98,7 +133,7 @@ ln -s /path/to/V548 "$PROJECT_DIR/train/backbone/V548-BERT"
 | `V610-GPT` | GPT / OLMo | `encoder/`、`base/` |
 | `V003-Preprocess` | 原 Step1 的默认预处理器 | `encoder/` |
 
-权重、`config.json`、tokenizer 和自定义 Python 代码必须配套。统一 Step4 默认离线加载，不自动下载缺失权重；新模型版本在 YAML 的 `models` 下增加条目。
+权重、`config.json`、tokenizer 和自定义 Python 代码必须配套。统一 Step4 默认离线加载，不自动下载缺失权重；新模型版本在 YAML 的 `models` 下增加条目。已有主干参数量、架构与预训练信息核对见本地 [backbone 对比](train/backbone/compare/README.md)；该目录与模型文件一样受 Git 忽略规则影响，迁移时需另行保留。
 
 ## 快速开始：提取、裁剪与训练
 
@@ -184,10 +219,12 @@ WANDB_MODE=offline "$PYTHON_BIN" train/train.py --config "$CROP_DIR/train_config
 | 统一 Step4 的 CLI / 环境变量路径 | 相对路径以启动目录为基准 |
 | `train/run/*/config.yaml` | 相对路径以 `train/` 为基准；不取决于 YAML 所在目录 |
 | Test1 提取配置 | 使用独立的 [eval/Test1/workflow/config.yaml](eval/Test1/workflow/config.yaml)，相对路径以项目根目录为基准 |
+| Test2 评测配置 | [eval/Test2/workflow/config.yaml](eval/Test2/workflow/config.yaml)，模型、特征与结果根目录使用绝对路径；`CONFIG` 可切换配置 |
+| Test3 协议配置 | [eval/Test3/workflow/config.yaml](eval/Test3/workflow/config.yaml)，模型及输出路径使用绝对路径；`CONFIG` / `PROTOCOL_DIR` 可覆盖 |
 
 统一 Step4 的优先级为：**CLI > 显式环境变量 > 当前模型条目 > `extraction` > 默认值**。`EXTRACTION_CONFIG` 可指定另一份 YAML。
 
-`OUTPUT_ROOT` 在原工作流中是中间输出根目录，在统一 Step4 中是特征根目录。为避免歧义，单步运行优先明确设置 `DATA_DIR`、`OUT_DIR`；更改环境变量不会自动改写训练 YAML 或 Test1 的配置。
+`OUTPUT_ROOT` 在原工作流中是中间输出根目录，在统一 Step4 中是特征根目录。单步运行应明确设置对应的输入、输出参数；它不会自动改写训练 YAML 或三个评测目录的配置。Test3 在 Step1 冻结完整配置与 run 清单，后续更改参数需建立新协议目录。
 
 ### 隐藏层与性能参数
 
@@ -239,7 +276,7 @@ MODEL_DIR="$PROJECT_DIR/train/backbone/V003-Preprocess/encoder" MODE=single \
 - 分别限制 BED 覆盖度、提取后实际位点覆盖度和 read MAPQ。
 - train/valid 按染色体与中心位点确定性划分；`--test-only` 将保留窗口全部写入 test。
 
-以下示例以 chr19 构建 train/valid，以 chr16 构建独立 test。覆盖度及 MAPQ 是示例实验设置。
+以下示例以 chr19 构建 train/valid，以 chr16 构建按染色体留出的 test。覆盖度及 MAPQ 是示例实验设置。
 
 ```bash
 GENOME_JSONL=/path/to/reads.preprocessed.jsonl
@@ -288,7 +325,7 @@ ln -s "$PROJECT_DIR/output/step3_output/chr16/test.jsonl.gz" "$PROJECT_DIR/outpu
 
 完整参数见 [train/run/example/config.yaml](train/run/example/config.yaml)。各实验配置经常调整，不在 README 固定其 seed、轮数或 GPU 列表；请核对 YAML 中的 `feature_dir`、`experiment`、`strategies`、`seeds`、`devices` 和 `training`。
 
-**目录名不决定训练内容。** 当前 `train/run/V548-V2/config.yaml` 指向 `data/V554-V2`、experiment 为 `V554-v2`；`train/run/V554-V2/config.yaml` 则指向 V548。使用这两个入口前应核对实际配置，或像上文那样使用 Step5 生成的配置。本 README 更新没有改动这些实验设置。
+**目录名不决定训练内容。** 实验模板可能被复用，运行前应检查 YAML 中实际的 `feature_dir`、`experiment` 与分类头清单，或使用 Step5 生成的 `train_config.yaml`。训练结果中的 `config.json` 才是对应 run 的实际配置；本 README 不固定经常调整的目录映射。
 
 | `strategy` | 输入与结构 |
 | --- | --- |
@@ -357,9 +394,15 @@ train/output/<experiment>/
 
 AUPRC 在代码中按 average precision 计算。跨 seed 的标准差/方差使用 `ddof=1`，表示训练随机种子的变动，不是独立生物重复的变动。`evaluate_train: true` 可增加 train 的最终评估；valid/test 始终评估。
 
-## Test1：WGA UNMOD 假阳性评测
+<a id="test1"></a>
 
-方案见 [eval/Test1/README.md](eval/Test1/README.md)，脚本说明见 [eval/Test1/workflow/README.md](eval/Test1/workflow/README.md)。这套评测使用 WGA 实验文库作为阴性对照，所有窗口标记为 0，构建窗口时不需要 bedMethyl。
+## Test1：假阳性评测
+
+方案见 [eval/Test1/README.md](eval/Test1/README.md)，脚本说明见 [eval/Test1/workflow/README.md](eval/Test1/workflow/README.md)。两条分支均保留 label=0，但阴性依据不同，结果分开命名和解释。
+
+### WGA UNMOD 阴性对照
+
+以 WGA 实验文库身份作为阴性依据，所有窗口标记为 0，构建窗口时不需要 bedMethyl。
 
 | Test1 步骤 | 功能 |
 | --- | --- |
@@ -385,6 +428,128 @@ DEVICE=cuda:0 bash eval/Test1/workflow/step4_evaluate.sh
 
 Test1 的 Shell 保存了具体实验路径，切换 `VERSION` 时需要同步特征、训练结果和输出路径。当前 `run_all.sh --test` 引用的 `test_step2_config.py` 不在工作区中，不能把它视为已可用的一键自测入口；可先逐步使用配置预览和受限小样本检查。
 
+### 天然 chr16 参考阴性
+
+[Step1.1](eval/Test1/workflow/step1.1_build_native_negatives.sh) 从对应主干的原 test 缓存中同步筛选 `label=0`，保留特征字节、参考标签、文库及原行号。它是 WGA 数据构建的平行分支，生成缓存后直接进入 Test1 Step4，无需再提取主干或中心裁剪。
+
+```bash
+# 只读核对原缓存和阴性数量，估算输出空间。
+VERSION=V011 INPUT_DIR="$PROJECT_DIR/train/data/V011-V2" \
+OUT_DIR=/path/to/new/native_bed0/V011 DRY_RUN=1 \
+  bash eval/Test1/workflow/step1.1_build_native_negatives.sh
+
+# 已构造天然阴性缓存后，用对应分类头评测。
+VERSION=V011 RUNS_ROOT="$PROJECT_DIR/train/output/V011-v2" \
+CROPPED_DIR=/path/to/native_bed0/V011 RESULTS_DIR=/path/to/new/native_bed0_results/V011 \
+DEVICE=cpu bash eval/Test1/workflow/step4_evaluate.sh
+```
+
+该结果表示相对于原 BED=0 参考标签的 FPR，不等同于 WGA 实验阴性 FPR。`library_id` 使用原天然文库 ID，同文库在 Test2/Test3 和不同主干之间保持一致。
+
+<a id="test2"></a>
+
+## Test2：天然参考阳性假阴性评测
+
+方案见 [eval/Test2/README.md](eval/Test2/README.md)，操作见 [workflow/README.md](eval/Test2/workflow/README.md)，统一配置为 [config.yaml](eval/Test2/workflow/config.yaml)。
+
+从原天然 chr16 test 选择 `label=1`，保留原始正类概率，报告 `FNR = FN / (TP + FN)` 和 `Recall = 1 - FNR`。默认同时报告全部阳性及最终 coverage≥5 子集，并输出上下文、覆盖度、阈值分层和漏检清单。
+
+| 步骤 | 作用 |
+| --- | --- |
+| Step1 | 可选：构造全阳性特征缓存，仅重新推理路线需要 |
+| Step2 | `predictions` 复用已有预测；或 `features` 加载匹配的分类头重新推理 |
+| Step3 | 原始/共同观测分别比较，重算 site coverage，汇总实际训练 seed |
+
+推荐默认 `evaluation.source: predictions`，无需 GPU，也无需 Step1：
+
+```bash
+# 只读列出将处理的 run 与输出目录。
+bash eval/Test2/workflow/run_all.sh --dry-run
+
+# 核对配置后执行：Step2 汇总已有预测，Step3 比较。
+bash eval/Test2/workflow/run_all.sh --run
+
+# 也可只预览一个模型的 Step2。
+VERSION=V011 DRY_RUN=1 bash eval/Test2/workflow/step2_evaluate.sh
+```
+
+只选择一个 run 时，可使用 `VERSION` 和 `RUN_DIR`；比较范围还需在 YAML 的 `enabled_versions / evaluation.strategies / evaluation.seeds` 中一致限定。空 seed 列表选择全部已完成 seed，支持 1/2/3、4/5/6 等。重新推理使用 `evaluation.source: features`，详见操作文档；两条路线应使用不同的新结果目录。
+
+主要输出为每个 run 的 `metrics.json`、FN 窗口/位点清单、`context_metrics.tsv`、`coverage_metrics.tsv`、`run_manifest.json`，以及比较目录下的 `raw_summary.tsv`、`common_summary.tsv` 和 `common_aggregate.tsv`。
+
+当前工作区缺少 `eval/Test2/workflow/test_workflow.py`，其一键入口默认模式及 `--test` 暂不可用；上面的 `--dry-run` 和 `--run` 是独立分支。
+
+<a id="test3"></a>
+
+## Test3：Coverage 鲁棒性
+
+方案见 [eval/Test3/README.md](eval/Test3/README.md)，操作见 [workflow/README.md](eval/Test3/workflow/README.md)，统一配置为 [config.yaml](eval/Test3/workflow/config.yaml)。
+
+**5× / 10× / 20× 在这里表示每个位点恰好抽取 5 / 10 / 20 条不同 read。** 它与 Test1 约5×总体测序深度的 WGA 文库不是同一个定义，也不模拟整条染色体重新低深度测序。
+
+主实验同时使用原 test 正负两类。先匹配所有选定主干、分类头、训练 seed 的共同 read–位点观测，再固定共同 coverage≥20 的位点。所有深度保持相同位点、标签和正负比例；不能按深度分别筛选位点。
+
+| 步骤 | 作用 |
+| --- | --- |
+| Step1 | 冻结配置/run 清单，审计完整正负预测；每主干一份观测索引、每 run 一份概率向量 |
+| Step2 | 构建全局共同 read 池，固定满足最大深度的位点；可选一次性1:1类别平衡 |
+| Step3 | 每个位点/重复生成共享排名，无放回嵌套抽样，满足 `5 ⊂ 10 ⊂ 20` |
+| Step4 | float64 平均概率汇总，计算各深度性能、Full-common 基线及逐位点稳定性 |
+| Step5 | 汇总训练/抽样变动、配对深度损失、模型差值、区块区间与 PNG/PDF 曲线 |
+
+默认复用 `test_predictions.tsv`，50次抽样；核心配置示例：
+
+```yaml
+# 完整配置中的节选；保留其余必需字段和 models 路径。
+enabled_versions: [V011, V543, V554, V610]
+prediction_source: saved
+minimum_common_reads: 20
+depths: [5, 10, 20]
+repeats: 50
+sampling_seed: 20261018
+site_balance: none              # 主分析保留全部合格位点；equal 为严格1:1补充实验
+site_threshold: 0.5
+```
+
+```bash
+# 临时 CPU 自测：验证抽样、平衡、指标、输入审计、汇总和图形导出。
+bash eval/Test3/workflow/run_all.sh --test
+
+# 五步只读计划，不生成正式结果。
+bash eval/Test3/workflow/run_all.sh --dry-run
+
+# 核对 YAML 后正式运行；结果写入其 output_dir。
+bash eval/Test3/workflow/run_all.sh --run
+
+# 前3步已完成且配置不变时，从Step4继续。
+bash eval/Test3/workflow/run_all.sh --run --from-step 4
+```
+
+Step4若已有部分 run 完成，应通过 `VERSION / RUN_NAME` 只处理缺少的任务，之后再执行Step5。已有目录拒绝覆盖；`CONFIG` 或 `--config` 可切换完整配置，`PROTOCOL_DIR` 或 `--protocol-dir` 可指定协议根目录，各步骤必须一致。
+
+主要汇总位于 `<output_dir>/summary/`：
+
+| 输出 | 内容 |
+| --- | --- |
+| `model_summary.tsv` | Site AUROC、AP、BA、F1、FPR/FNR等均值，训练seed SD与抽样范围分别报告 |
+| `depth_differences.tsv` | 相对20条read的低深度性能损失 |
+| `model_differences.tsv` | 相同位点和抽样清单上的模型差值，训练seed配对信息另列 |
+| `full_common_summary.tsv` | 固定位点使用全部共同read的辅助基线 |
+| `stability_summary.tsv` | 位点分数波动、调用不稳定性、错误频率等 |
+| `figures/` | AUROC、BA、FPR/FNR随read数变化的PNG/PDF |
+
+`site_balance: none` 保留全部合格位点；严格1:1补充实验设置 `equal` 并使用新协议目录。等量位点只选一次，所有模型、深度和重复共用，不复制 read 或每次重新平衡。
+
+抽样范围、训练 seed SD 和基因组区块区间分别解释。默认区块 CI 用于 BA/FPR/FNR；AUROC/AP不通过平均区块分数计算区间。50次抽样复用同一有限 read 池，不是50份独立生物样本。该分析主要检验已有窗口概率的位点汇总鲁棒性。
+
+## 评测前核对
+
+- **模型与数据匹配**：各主干使用自身特征和分类头；已有预测需对应冻结的检查点和参考标签。
+- **分母与阈值固定**：比较时匹配共同观测，再计算coverage；阈值在valid/独立校准数据上确定，不用Test1/2/3挑最佳seed或工作点。
+- **明确测试状态**：`partial_test / partial_extraction` 标记限量数据。小前缀的位点可能只有1条read，不能当作真实5/10/20覆盖度实验。
+- **测试入口可用性**：Test3提供18项临时CPU测试；Test1/Test2当前缺少各自入口引用的测试文件，先使用可用的逐步计划检查。
+- **存储与复现**：Test3优先复用概率，不为每个depth/repeat复制特征；保留实际配置、输入签名、共同位点、抽样和权重哈希。旧预测未嵌入检查点SHA256时，来源一致性核对不等于证明其历史生成过程。
+
 ## 常见问题
 
 | 现象 | 检查方式 |
@@ -398,6 +563,10 @@ Test1 的 Shell 保存了具体实验路径，切换 `VERSION` 时需要同步�
 | 裁剪提示输入发生变化 | 源特征、TSV 和模板 YAML 都可能被检查；保持输入稳定，使用最终成功提示判断是否完成。 |
 | 启动后暂时没有训练 step | 启动阶段可能正在检查清单、元数据和跨 split 位点；先查看日志阶段。 |
 | 不同主干的样本数不一致 | 检查 Step4 的跳过、超长和截断统计，比较时匹配共同窗口/位点。 |
+| Test2 `--test` 提示文件不存在 | 当前缺少 `eval/Test2/workflow/test_workflow.py`；用 `--dry-run` 核对现有评测配置。 |
+| Test3 提示配置已变化 | Step1 已冻结完整配置；恢复原配置继续后序步骤，或使用新的协议目录。 |
+| Test3 小样本没有 coverage≥20 的位点 | `MAX_RECORDS` 限制的是原始输入行，未保留某个位点的完整read；增加真实覆盖，或仅在隔离配置中降低深度做接口联调。 |
+| 评测输出目录已存在 | 使用新结果/协议目录；部分任务完成时按各入口的单run筛选继续，避免覆盖已完成结果。 |
 
 `DRY_RUN=1 bash ...` 通常只预览；训练入口的 `--dry-run` 会读取真实输入并检查任务，大数据下仍可能耗时。统一 Step4 的 `--print-plan` 解析配置和模型配置路径，但不加载权重。
 
