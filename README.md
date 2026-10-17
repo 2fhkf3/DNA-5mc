@@ -1,184 +1,248 @@
 # DNA-5mC
 
-基于 Nanopore 信号预训练模型表征的 DNA 5mC 二分类实验流程，包含信号预处理、按位点构建数据集、类别平衡、特征提取、中心窗口裁剪，以及多种分类头的训练与评估。
+基于 Nanopore 电流信号预训练表征的 DNA 5mC 检测项目，包含数据构建、BERT / Diffusion / GPT 特征提取、分类头训练，以及 WGA UNMOD 阴性对照评测。
 
-训练阶段读取预先提取的特征，只训练分类头。BERT、Diffusion 和 GPT 主干在 Step4 中用于提取表征，不在分类训练中更新。
+**主干模型负责提取特征，训练阶段只更新分类头。** 本项目从已有的比对 JSONL 开始，不包含从 POD5/FAST5 到比对 JSONL 的完整 basecalling 流程。模型权重、原始数据、特征和实验结果需要单独准备。
 
-![DNA-5mC Workflow：从信号预处理、位点数据集构建、特征提取和中心裁剪，到分类头训练与评估](docs/assets/dna-5mc-workflow.png)
+![DNA-5mC 工作流](docs/assets/dna-5mc-workflow.png)
 
 ```text
-带比对及碱基—信号对应关系的 JSONL + bedMethyl
-  → Step1 信号预处理
-  → Step2 构建带标签的碱基窗口，按位点划分数据集
-  → Step3 类别平衡 / 可选筛选
-  → Step4 encoder + BERT / Diffusion / GPT → [N, W, H] 特征
-  → Step5 可选中心裁剪，例如 15 → 5 / 7 / 9
-  → 分类头训练 → read/window 与 site 两个层面的评估
+训练与常规测试
+比对 JSONL + bedMethyl
+  → 信号预处理 → 带标签窗口 → 类别平衡 / 筛选
+  → encoder + BERT / Diffusion / GPT → [N, 15, H] 特征
+  → 中心裁剪，例如 [N, 5, H] → 分类头训练 → read/window 与 site 指标
+
+外部阴性对照（eval/Test1）
+已预处理的 WGA UNMOD JSONL
+  → 全阴性窗口 → 对应主干特征 → 已训练分类头 → 假阳性率及分层统计
 ```
 
-本仓库从已有 JSONL 开始，不包含从 POD5/FAST5 生成比对 JSONL 的完整 basecalling 流程。预训练权重、原始数据、特征缓存和训练结果需单独准备，不随 Git 仓库分发。
+## 从哪里开始
 
-## 1. 目录结构
+| 已有材料 / 目标 | 入口 |
+| --- | --- |
+| 已有窗口 JSONL，提取主干特征 | [统一 Step4 配置](workflow/config/step4_config.yaml)、[提取与训练示例](#快速开始提取裁剪与训练) |
+| 已有完整 Step4 特征，开始训练 | [中心裁剪与训练](#中心裁剪与训练) |
+| 从全 read JSONL 和 bedMethyl 构建数据集 | [数据构建](#数据构建step1step3) |
+| 用 WGA UNMOD 检查假阳性 | [Test1 阴性评测](#test1wga-unmod-假阳性评测) |
+| 查找参数、输出或故障原因 | [配置与路径约定](#配置与路径约定)、[输出与指标](#输出与指标)、[常见问题](#常见问题) |
+
+本文命令在项目根目录执行；`/path/to/...` 需替换为实际路径。正式命令会处理数据，带 `DRY_RUN=1` 的命令用于预览。
+
+## 目录结构
 
 ```text
 DNA-5mC/
-├── README.md
 ├── workflow/
-│   ├── paths.sh                               # Bash 入口共用路径设置
+│   ├── paths.sh                          # 路径与 Python 环境选择
+│   ├── config/step4_config.yaml          # 统一特征提取配置
 │   ├── step1_preprocess_signal_jsonl.{py,sh}
 │   ├── step2_build_chrom19_dataset.{py,sh}
 │   ├── step3_balance_chr19.py
 │   ├── step3_run_balance_chr19.sh
-│   ├── step3.1_extract_chr19_small.py           # 可选：抽取小数据集
-│   ├── step3.2_filter_chr19_mapq.py             # 可选：提高 MAPQ / 覆盖度要求
-│   ├── step4_extract_features.{py,sh}   # 统一 YAML 配置入口
-│   ├── step4_config.yaml
-│   ├── step4_extract_window_hidden_states_BERT-js.{py,sh}
-│   ├── step4_extract_window_hidden_states_Diffusion-kx.{py,sh}
-│   ├── step4_extract_window_hidden_states_GPT.{py,sh}
+│   ├── step3.1_extract_chr19_small.py     # 可选：小数据集抽取
+│   ├── step3.2_filter_chr19_mapq.py       # 可选：MAPQ / 覆盖度筛选
+│   ├── step4_extract_features.{py,sh}    # 推荐：统一 BERT / Diffusion / GPT 入口
+│   ├── step4_extract_window_hidden_states_*.{py,sh}  # 架构实现与原入口
 │   └── step5_center_crop_features.{py,sh}
 ├── train/
-│   ├── train.py                               # 训练、任务调度及评估
-│   ├── wandb_tracking.py                      # W&B 记录模块
-│   ├── model/                                 # 分类头实现
-│   ├── run/                                   # YAML 配置和启动脚本
-│   │   ├── example/
-│   │   ├── V011-v2/
-│   │   ├── V543-v2/
-│   │   ├── V554-v1/
-│   │   ├── V610-v2/
-│   │   └── compare-jingyue/
-│   ├── backbone/                              # 外部模型或软链接，Git 忽略
-│   ├── data/                                  # 裁剪特征，Git 忽略
-│   └── output/                                # 分类训练输出，Git 忽略
-└── output/                                    # Step1–Step4 输出，Git 忽略
+│   ├── train.py                          # 分类头训练、调度和评估
+│   ├── model/                            # 分类头实现
+│   ├── gpu_feature_cache.py              # 已提取特征的 GPU 缓存
+│   ├── wandb_tracking.py                 # 可选 W&B 记录
+│   ├── run/                              # 实验 YAML 和启动脚本
+│   ├── backbone/                         # 外部预训练模型或软链接
+│   ├── data/                             # 裁剪后的训练特征
+│   └── output/                           # 分类头权重与实验结果
+├── eval/Test1/
+│   ├── README.md                         # WGA 阴性评测方案
+│   ├── workflow/                         # 阴性数据构建、提取和评测脚本
+│   ├── data/                             # 阴性窗口与特征
+│   └── output/                           # 假阳性评测结果
+├── docs/assets/                          # 文档图片
+└── output/
+    ├── .hf_modules/                      # Hugging Face 自定义模型代码缓存
+    └── ...                               # 部分脚本使用的默认中间输出
 ```
 
-脚本中的 `chr19` 是历史命名，实际处理的染色体由参数决定。GitHub 仓库名为 `DNA-5mc`，下面示例将本地目录命名为 `DNA-5mC`。
+`chr19` 是部分脚本的历史名称，实际染色体由参数决定。外部数据也可位于 NAS 或其他磁盘；上面的目录结构不要求将所有数据复制到项目内。
 
-## 2. 环境与路径
+## 环境与模型准备
 
-使用 Linux、Bash 和 Python 3.10 或更高版本。以下版本来自当前开发环境，供搭建环境时参考；不同主干还可能需要其自带模型代码声明的依赖。
-
-| 依赖 | 当前环境版本 | 用途 |
-| --- | --- | --- |
-| Python | 3.10.20 | 运行脚本 |
-| PyTorch | 2.6.0 | 特征提取、分类训练、读取 `.pt` 清单 |
-| Transformers | 4.48.3 | 加载 encoder 和主干模型 |
-| NumPy | 1.26.4 | 特征数组、memmap 和指标计算 |
-| PyYAML | 6.0.3 | 配置文件 |
-| safetensors | 0.7.0 | 预训练权重 |
-| tqdm | 4.67.3 | 部分模型代码的进度显示 |
-| wandb | 0.28.0 | 可选的实验记录 |
-
-先安装与机器 CUDA 环境匹配的 PyTorch，再安装其余依赖。可选安装 `orjson` 加速 JSON 处理；Step1 的压缩相关操作可使用系统中的 `pigz`。
+已验证的主要运行环境为 Python 3.10、PyTorch 2.6.0、Transformers 4.48.3 和 NumPy 1.26.4；还需要 PyYAML、safetensors 及各模型自定义代码依赖。W&B 仅在启用实验记录时需要安装。
 
 ```bash
-git clone https://github.com/2fhkf3/DNA-5mc.git DNA-5mC
-cd DNA-5mC
-
-# 在已准备好的 Python / Conda 环境中执行。
+# 在包含项目依赖的 Python / Conda 环境中执行。
 export PROJECT_DIR="$(pwd)"
 export PYTHON_BIN="$(command -v python)"
-"$PYTHON_BIN" -m pip install transformers==4.48.3 numpy==1.26.4 \
-  PyYAML==6.0.3 safetensors==0.7.0 tqdm==4.67.3
-# 使用 W&B 时再安装。
-"$PYTHON_BIN" -m pip install wandb==0.28.0
+
+# 检查解释器及主要依赖，不执行提取或训练。
+"$PYTHON_BIN" -c 'import sys, torch, transformers, numpy, yaml; print(sys.executable); print(torch.__version__, transformers.__version__, numpy.__version__)'
 ```
 
-所有 Bash 入口通过 [workflow/paths.sh](workflow/paths.sh) 定位项目，不依赖启动时的工作目录。本文命令统一在项目根目录执行；`/path/to/...` 均需替换为实际路径。
+Bash 入口通过 [paths.sh](workflow/paths.sh) 选择解释器：显式 `PYTHON_BIN` 优先，其次是激活的非 base Conda 环境，再尝试本服务器已有的 PoreDLM 环境。迁移到其他机器时，建议显式指定 `PYTHON_BIN`。
 
-| 环境变量 | 默认值 / 行为 |
-| --- | --- |
-| `PYTHON_BIN` | 显式指定优先；否则使用已激活的非 base Conda 环境，再尝试服务器已有的 PoreDLM 环境；均不可用时使用当前 Conda Python 或 `python3` |
-| `BACKBONE_ROOT` | `项目根目录/train/backbone` |
-| `OUTPUT_ROOT` | `项目根目录/output`，影响工作流的默认输入输出路径 |
-| `HF_MODULES_CACHE` | `OUTPUT_ROOT/.hf_modules` |
-| `DRY_RUN=1` | Bash 入口只显示解析后的路径和命令，不开始处理或训练 |
-
-**训练 YAML 的相对路径始终以 `train/` 为基准**，与 YAML 自身位置、启动目录无关。例如 `feature_dir: data/V543-V2` 指向 `train/data/V543-V2`；`output_dir: output` 指向 `train/output`。修改 `OUTPUT_ROOT` 不会自动修改 YAML。
-
-若启动时报 `No module named 'numpy'` 或 `No module named 'torch'`，应检查实际使用的 Python。当前服务器的 `base` 环境缺少训练依赖，Bash 入口在 `base` 下优先使用已有 PoreDLM；手动设置 `PYTHON_BIN` 时，请确保对应环境包含这些依赖。
-
-## 3. 准备预训练模型
-
-将已有模型放在 `train/backbone/`，或创建同名软链接。以下名称与现有脚本的默认值对应；只需准备计划使用的模型。
+仅需准备计划使用的模型。可将模型放入 `train/backbone/`，或创建软链接：
 
 ```bash
 mkdir -p "$PROJECT_DIR/train/backbone"
-ln -s /path/to/V011 "$PROJECT_DIR/train/backbone/V011-Diffusion"
-ln -s /path/to/V543 "$PROJECT_DIR/train/backbone/V543-BERT"
-ln -s /path/to/V554 "$PROJECT_DIR/train/backbone/V554-BERT"
-ln -s /path/to/V610 "$PROJECT_DIR/train/backbone/V610-GPT"
-# Step1 原有预处理流程使用的模型。
-ln -s /path/to/V003 "$PROJECT_DIR/train/backbone/V003-Preprocess"
+ln -s /path/to/V548 "$PROJECT_DIR/train/backbone/V548-BERT"
+# 链接已存在时先核对目标，不要直接覆盖。
 ```
 
-| 本地目录名 | 需要的子目录 | 对应入口 |
+| 本地模型目录 | 架构 / 用途 | 需要的主要子目录 |
 | --- | --- | --- |
-| `V003-Preprocess` | `encoder/`，包含预处理器配置及代码 | Step1 |
-| `V543-BERT`、`V554-BERT` | `encoder/`、`base/` | Step4 BERT |
-| `V011-Diffusion` | `encoder/`、`hf_dlm_elf_mixed_with_cls_token_step65000-unsharded/` | Step4 Diffusion |
-| `V610-GPT` | `encoder/`、`base/` | Step4 GPT |
+| `V011-Diffusion` | Diffusion | `encoder/`、`hf_dlm_elf_mixed_with_cls_token_step65000-unsharded/` |
+| `V543-BERT`、`V548-BERT`、`V554-BERT` | BERT | `encoder/`、`base/` |
+| `V610-GPT` | GPT / OLMo | `encoder/`、`base/` |
+| `V003-Preprocess` | 原 Step1 的默认预处理器 | `encoder/` |
 
-模型目录中的配置、tokenizer、自定义 Python 文件与权重应配套保存。各主干的 token 映射和特殊 token 约定不同，分别使用对应提取脚本。Diffusion/GPT 的 Bash 入口默认启用 Hugging Face 离线模式，需要本地模型文件完整。
+权重、`config.json`、tokenizer 和自定义 Python 代码必须配套。统一 Step4 默认离线加载，不自动下载缺失权重；新模型版本在 YAML 的 `models` 下增加条目。
 
-## 4. 已有特征时：裁剪后开始训练
+## 快速开始：提取、裁剪与训练
 
-如果已有 Step4 的完整输出，可直接从这里开始。下面以 V543 的中心 5-mer 为例，输入目录必须同时包含 `train`、`valid`、`test` 三个 split。
+### 提取主干特征
+
+统一入口为 [step4_extract_features.sh](workflow/step4_extract_features.sh)，主要修改 [workflow/config/step4_config.yaml](workflow/config/step4_config.yaml)：
+
+```yaml
+model: V548
+
+extraction:
+  data_dir: /path/to/window_splits     # 包含 train/valid/test.jsonl.gz 或 .jsonl
+  splits: [train, valid, test]
+  output_root: /path/to/features      # out_dir 为 null 时，输出到此目录下的 V548/
+  out_dir: null                      # 可直接指定完整的新输出目录
+  device: cuda:0
+  dtype: float16                     # 特征落盘精度
+  limit: null                        # 正式运行保持 null；测试可设 17
+```
+
+这是需合并到完整 YAML 中的片段，保留原有 `models` 条目。当前 YAML 保存了服务器上的绝对数据路径，运行前以预览结果为准。
 
 ```bash
-INPUT_DIR="$PROJECT_DIR/output/step4_output/V543" \
-OUT_DIR="$PROJECT_DIR/train/data/V543-V2" \
-TRAIN_CONFIG="$PROJECT_DIR/train/run/V543-v2/config.yaml" \
-WINDOW_SIZE=5 EXPERIMENT=V543-v2 \
-  bash workflow/step5_center_crop_features.sh
+# 仅解析配置，核对模型路径，并显示 missing_inputs / output_exists。
+DRY_RUN=1 MODEL=V548 bash workflow/step4_extract_features.sh
 
-# 验证真实输入、元数据和任务配置，不启动训练。
-bash train/run/V543-v2/run.sh --dry-run
+# 小样本提取：每个选中的 split 最多读取 17 个窗口。
+# 使用独立的新目录，避免与正式特征混淆。
+MODEL=V548 LIMIT=17 OUT_DIR=/path/to/new/V548_smoke \
+  bash workflow/step4_extract_features.sh
 
-# 小规模试跑：一个分类头、一个 seed、单张 GPU、最多两轮。
-# W&B 离线记录仍需要安装 wandb；也可在 YAML 中设置 enabled: false。
-WANDB_MODE=offline bash train/run/V543-v2/run.sh \
-  --strategies center_5mer_mlp_raw768 --seeds 1 --device cuda:0 \
-  --epochs 2 --experiment V543-smoke
-
-# 完整实验：使用 YAML 中设置的分类头、seed、设备和早停配置。
-WANDB_MODE=offline bash train/run/V543-v2/run.sh
+# 正式提取：使用 YAML 中的数据和输出路径。
+MODEL=V548 bash workflow/step4_extract_features.sh
 ```
 
-`DRY_RUN=1 bash ...` 只预览命令；`bash ... --dry-run` 则调用 Python 校验真实输入，数据量大时仍需要扫描元数据。
+设置 `MODEL=V011` 或 `MODEL=V610` 即可切换架构；`VERSION` 也是模型选择别名，同时设置时 `MODEL` 优先。只处理测试集可设 `SPLITS=test`，但训练版 Step5 和分类训练要求三个 split 齐全。
 
-## 5. 从 JSONL 构建数据集
+直接调用 Python 时，显式传入当前配置路径：
 
-### Step1：信号预处理
+```bash
+"$PYTHON_BIN" workflow/step4_extract_features.py \
+  --config workflow/config/step4_config.yaml --model V548 --print-plan
+```
 
-输入应已包含信号、序列、比对和碱基—信号对应信息。Step1 使用模型的 `AutoFeatureExtractor` 处理 `signal`，保留其他字段，并检查处理前后的长度。
+输出目录必须是新目录。统一入口加载一次模型，依次处理各 split，全部成功后发布结果；同时保存实际配置和输入签名。运行中编辑 YAML 只影响后续任务，输入窗口或模型配置变化仍会报错。`limit` 非空时，汇总记录 `partial_extraction: true`。
+
+### 中心裁剪与训练
+
+下面使用已有的完整 Step4 特征，生成中心 5-mer 缓存及对应训练配置。裁剪保留 Step4 的上下文信息，只截取隐藏状态的位置，不重新运行主干模型。
+
+```bash
+# 指向完整 Step4 输出，包含三个 split。
+export FEATURE_DIR=/path/to/features/V548
+export CROP_DIR="$PROJECT_DIR/train/data/V548_center5"
+
+INPUT_DIR="$FEATURE_DIR" OUT_DIR="$CROP_DIR" WINDOW_SIZE=5 \
+TRAIN_CONFIG="$PROJECT_DIR/train/run/example/config.yaml" EXPERIMENT=V548-center5 \
+  bash workflow/step5_center_crop_features.sh
+
+# 使用刚生成的配置，避免目录名和手工修改的训练配置不一致。
+# --dry-run 校验实际输入和任务，不训练、不写实验结果。
+"$PYTHON_BIN" train/train.py --config "$CROP_DIR/train_config.yaml" --dry-run
+
+# 小规模训练：一个分类头、一个 seed、最多两轮，另设实验名称。
+WANDB_MODE=offline "$PYTHON_BIN" train/train.py \
+  --config "$CROP_DIR/train_config.yaml" \
+  --strategies center_5mer_mlp_raw768 --seeds 1 --device cuda:0 \
+  --epochs 2 --experiment V548-center5-smoke
+
+# 完整训练：采用生成配置中的策略、seed、设备及早停设置。
+WANDB_MODE=offline "$PYTHON_BIN" train/train.py --config "$CROP_DIR/train_config.yaml"
+```
+
+`TRAIN_CONFIG` 是训练模板，Step5 会生成新的 `train_config.yaml`，不会修改模板。`WINDOW_SIZE` 可选 5、7、9 等不超过输入长度的奇数；更改时也应更换输出目录。
+
+名称含 `center_5mer` 的 Linear、Gaussian Pool、Learned Pool、MLP、DWConv 头固定取中心 5 个位置；`center_base` 只取中心位置。融合头通过 `fusion_window_size` 控制窗口，适合比较不同裁剪长度。具体模型结构见 [train/model](train/model)。
+
+## 配置与路径约定
+
+| 配置 / 入口 | 路径解析方式 |
+| --- | --- |
+| 统一 Step4 YAML | 相对路径以项目根目录为基准 |
+| 统一 Step4 的 CLI / 环境变量路径 | 相对路径以启动目录为基准 |
+| `train/run/*/config.yaml` | 相对路径以 `train/` 为基准；不取决于 YAML 所在目录 |
+| Test1 提取配置 | 使用独立的 [eval/Test1/workflow/config.yaml](eval/Test1/workflow/config.yaml)，相对路径以项目根目录为基准 |
+
+统一 Step4 的优先级为：**CLI > 显式环境变量 > 当前模型条目 > `extraction` > 默认值**。`EXTRACTION_CONFIG` 可指定另一份 YAML。
+
+`OUTPUT_ROOT` 在原工作流中是中间输出根目录，在统一 Step4 中是特征根目录。为避免歧义，单步运行优先明确设置 `DATA_DIR`、`OUT_DIR`；更改环境变量不会自动改写训练 YAML 或 Test1 的配置。
+
+### 隐藏层与性能参数
+
+| 参数 | 作用 |
+| --- | --- |
+| BERT `hidden_layer` | `hidden_states` 索引：0 为 embedding，1 为首层输出，-1 为最后 Transformer 层输出 |
+| Diffusion `hidden_source` | `ode_hidden`、`context_hidden`、`last_hidden` 等；V011 默认 ODE 起点 0.97、1 步、CFG 0.5 |
+| GPT `decoder_layers` | `last`、`embed` 或从 0 开始的 Transformer 层编号；多选时还需明确 `selected_layer_name` |
+| `batch_size` | 主干推理批次；当前统一配置中 BERT 为 8，Diffusion/GPT 为 32，模型条目可覆盖 |
+| `dtype` | 仅控制缓存落盘精度，不将主干推理自动切换为 FP16 |
+| `pooling_device` | `model` 在模型设备上按原 span 做 FP32 聚合后传回 CPU；`cpu` 保留原 CPU 聚合 |
+| `codec_batch_size` | 默认 1，逐条编码；大于 1 时按等长信号批量编码 |
+| `codec_buffer_size` | 等长分组缓冲窗口数，只在批量 codec 启用时使用 |
+
+不同主干的 token 映射、特殊 token 和隐藏层语义不同，应保持与对应训练特征一致。改变这些参数后，需要使用匹配的特征重新训练分类头。
+
+GPU 聚合会因求和顺序产生微小浮点差异；批量 codec 的卷积舍入差异可能进一步改变离散 token，已有真实小样本测试观察到该现象，因此正式对比默认保留 `codec_batch_size: 1`。当前实现未通过额外降低主干精度来提速。
+
+原 [BERT](workflow/step4_extract_window_hidden_states_BERT-js.sh)、[Diffusion](workflow/step4_extract_window_hidden_states_Diffusion-kx.sh)、[GPT](workflow/step4_extract_window_hidden_states_GPT.sh) 入口仍可使用，其默认输出路径、批次和 dtype 与统一入口可能不同。
+
+### `output/.hf_modules` 是什么
+
+该目录由 Transformers 加载本地自定义模型代码时自动生成，位置由 `HF_MODULES_CACHE` 控制。里面的 `modeling_pore_codec.py`、`modeling_bert.py` 等是代码缓存，**不代表已生成特征或训练结果**。
+
+原始模型代码位于 `train/backbone/<模型>/encoder/` 或主干 checkpoint 目录中；不要把缓存副本作为正式修改来源。仅存在 `.hf_modules` 时，说明发生过模型代码加载，不能据此判断提取是否完成。
+
+## 数据构建：Step1–Step3
+
+### Step1：预处理全 read 信号
+
+输入需包含信号、序列、比对及碱基—信号对应信息。Step1 使用模型预处理器处理 `signal`，保留其他字段，并可检查处理前后的信号长度。
 
 ```bash
 INPUT_FILE=/path/to/reads.genome_signal.jsonl \
 OUTPUT_FILE="$PROJECT_DIR/output/step1_output/reads.preprocessed.jsonl" \
-MODEL_DIR="$PROJECT_DIR/train/backbone/V003-Preprocess/encoder" \
-MODE=single \
+MODEL_DIR="$PROJECT_DIR/train/backbone/V003-Preprocess/encoder" MODE=single \
   bash workflow/step1_preprocess_signal_jsonl.sh
 ```
 
-可用 `LIMIT=10000` 先处理少量记录；需要并行预处理时，可使用 `MODE=shard JOBS=4`。若输入已按目标预处理器处理，先确认其处理方式和坐标对应关系，再决定是否跳过 Step1，避免重复处理信号。
+可先加 `LIMIT=10000` 小规模检查；`MODE=shard JOBS=4` 用于分片并行。输入已经预处理时，先核对处理方式及信号坐标，再决定是否跳过 Step1，避免重复归一化。
 
-### Step2：生成窗口和标签，按位点划分
+### Step2：根据 bedMethyl 构建窗口与标签
 
-Step2 从一个输入数据集及 bedMethyl 构建正负样本，不需要分别提供 MOD/UNMOD 输入。当前规则包括：
+训练用 [Step2](workflow/step2_build_chrom19_dataset.py) 从同一输入 JSONL 和 bedMethyl 生成两类窗口：
 
-- 中心参考碱基为 `C`，read 和 BED 均使用正链，默认修饰类型为 `m`。
-- bedMethyl 修饰百分比为 `100` 的位点标记为 `1`，为 `0` 的标记为 `0`；中间百分比不进入数据集。
-- 默认窗口为中心左右各 7 个碱基，共 15 nt；要求窗口内 query 序列与参考序列一致，信号跨度有效。
-- 分别检查 BED 覆盖度、提取后的实际位点覆盖度和 read MAPQ。
-- train/valid 按 `chrom + position` 确定性划分，同一位点的窗口归入同一个 split；`--test-only` 将保留数据全部写入 test。
+- 默认中心参考碱基为 C，使用正链 read 和正链 BED、修饰类型 `m`。
+- bedMethyl 修饰百分比为 100 的位点标记为 1，为 0 的标记为 0；中间值不进入数据集。
+- 默认左右各 7 个碱基，共 15 nt；检查 query/reference 一致性和信号跨度。
+- 分别限制 BED 覆盖度、提取后实际位点覆盖度和 read MAPQ。
+- train/valid 按染色体与中心位点确定性划分；`--test-only` 将保留窗口全部写入 test。
 
-以下示例使用 chr19 构建 train/valid，chr16 构建独立 test。覆盖度和 MAPQ 是示例实验设置，应按实际数据需求选择。
+以下示例以 chr19 构建 train/valid，以 chr16 构建独立 test。覆盖度及 MAPQ 是示例实验设置。
 
 ```bash
-GENOME_JSONL="$PROJECT_DIR/output/step1_output/reads.preprocessed.jsonl"
+GENOME_JSONL=/path/to/reads.preprocessed.jsonl
 BED_METHYL=/path/to/labels.bed.gz
 
 "$PYTHON_BIN" workflow/step2_build_chrom19_dataset.py \
@@ -194,250 +258,147 @@ BED_METHYL=/path/to/labels.bed.gz
   --min-mapq 30 --test-only
 ```
 
-这里直接调用 Python，以明确区分训练集和测试集设置。[Step2 的 Bash 入口](workflow/step2_build_chrom19_dataset.sh) 当前默认是 **chr16、覆盖度 20、test-only**；只修改染色体参数不会取消 `test-only`。
+[Step2 Shell](workflow/step2_build_chrom19_dataset.sh) 当前预设为 chr16、覆盖度 20、test-only；只改染色体不会取消 test-only，因此上例直接调用 Python。
 
-上游 JSONL 除 `signal`、`seq`、`chrom`、`strand`、`mapq` 和原始 read ID 外，还需要 `base_sample_span_seq` 及 `per_base`。后者包含 `genome_pos0`、`query_pos_signal`、`signal_span`、`query_base`、`ref_base` 等映射信息。仅有序列和信号数组不足以构建参考位点窗口；准确规则见 [Step2 实现](workflow/step2_build_chrom19_dataset.py)。
+除 `signal`、`seq`、`chrom`、`strand`、`mapq` 和原始 read ID 外，上游 JSONL 还需有 `base_sample_span_seq` 与 `per_base`；其中包含参考位置、query 位置、信号跨度及 query/reference 碱基等映射。仅有序列和信号数组不足以构建这些窗口。
 
-### Step3：类别平衡与可选筛选
+### Step3：平衡、筛选与汇集 split
 
-平衡输入使用完整的 Step2 输出目录，保留其清单和校验信息。按 read/window 样本数平衡两类，同时维持最小位点覆盖度，保持已有 split 归属。
+[类别平衡](workflow/step3_run_balance_chr19.sh) 按窗口数平衡两类，同时维持最小位点覆盖度，保持原 split 归属。输入应是完整 Step2 输出目录，保留清单和校验信息。
 
 ```bash
 INPUT_DIR="$PROJECT_DIR/output/step2_output/chr19_cov10" \
-OUT_DIR="$PROJECT_DIR/output/step3_output/chr19" \
-MIN_COVERAGE=10 SPLITS="train valid" \
+OUT_DIR="$PROJECT_DIR/output/step3_output/chr19" MIN_COVERAGE=10 SPLITS="train valid" \
   bash workflow/step3_run_balance_chr19.sh
 
 INPUT_DIR="$PROJECT_DIR/output/step2_output/chr16_cov20_test" \
-OUT_DIR="$PROJECT_DIR/output/step3_output/chr16" \
-MIN_COVERAGE=20 SPLITS=test \
+OUT_DIR="$PROJECT_DIR/output/step3_output/chr16" MIN_COVERAGE=20 SPLITS=test \
   bash workflow/step3_run_balance_chr19.sh
 
-# Step4 从同一个目录读取三个 split；这里使用软链接汇集。
+# 将三个 split 汇集到 Step4 的同一个输入目录。
 mkdir -p "$PROJECT_DIR/output/step3_output/new"
-ln -s "$PROJECT_DIR/output/step3_output/chr19/train.jsonl.gz" \
-  "$PROJECT_DIR/output/step3_output/new/train.jsonl.gz"
-ln -s "$PROJECT_DIR/output/step3_output/chr19/valid.jsonl.gz" \
-  "$PROJECT_DIR/output/step3_output/new/valid.jsonl.gz"
-ln -s "$PROJECT_DIR/output/step3_output/chr16/test.jsonl.gz" \
-  "$PROJECT_DIR/output/step3_output/new/test.jsonl.gz"
+ln -s "$PROJECT_DIR/output/step3_output/chr19/train.jsonl.gz" "$PROJECT_DIR/output/step3_output/new/train.jsonl.gz"
+ln -s "$PROJECT_DIR/output/step3_output/chr19/valid.jsonl.gz" "$PROJECT_DIR/output/step3_output/new/valid.jsonl.gz"
+ln -s "$PROJECT_DIR/output/step3_output/chr16/test.jsonl.gz" "$PROJECT_DIR/output/step3_output/new/test.jsonl.gz"
 ```
 
-`SITE_POLICY=auto` 在必要时可能移除部分多数类位点；`preserve_all` 要求保留所有位点，无法同时满足平衡与覆盖度时会报错。
+`SITE_POLICY=auto` 必要时允许移除部分多数类位点；`preserve_all` 要求保留全部位点，无法同时平衡时会报错。可选 [Step3.1](workflow/step3.1_extract_chr19_small.py) 抽取小数据集、[Step3.2](workflow/step3.2_filter_chr19_mapq.py) 提高 MAPQ / 实际覆盖度要求。筛选后的类别比例需重新核对。
 
-可选使用 [Step3.1](workflow/step3.1_extract_chr19_small.py) 抽取小数据集，或 [Step3.2](workflow/step3.2_filter_chr19_mapq.py) 按更高 MAPQ 和实际覆盖度筛选。筛选后的类别比例需重新检查。各 Bash 入口保存了具体实验的默认路径，衔接时应显式设置 `INPUT_DIR`、`OUT_DIR`，不要假定所有默认值可直接串联。
+## 分类头、训练与早停
 
-## 6. Step4：提取主干特征
+完整参数见 [train/run/example/config.yaml](train/run/example/config.yaml)。各实验配置经常调整，不在 README 固定其 seed、轮数或 GPU 列表；请核对 YAML 中的 `feature_dir`、`experiment`、`strategies`、`seeds`、`devices` 和 `training`。
 
-推荐使用新增的统一入口 [step4_extract_features.sh](workflow/step4_extract_features.sh)，参数集中在 [step4_config.yaml](workflow/step4_config.yaml)。Python 入口 [step4_extract_features.py](workflow/step4_extract_features.py) 复用原有三类提取器，支持任意兼容的新版本名；只复用 Test1 的通用配置/I/O 工具，不要求 WGA 标签、`dataset_manifest.json` 或 `sample_audit.sqlite`。
-
-```bash
-# 预览：不加载权重、不创建输出，显示缺失的输入 split。
-DRY_RUN=1 bash workflow/step4_extract_features.sh
-
-# 正式：先在 YAML 中填写实际 data_dir，再选择模型。
-MODEL=V548 bash workflow/step4_extract_features.sh
-MODEL=V011 bash workflow/step4_extract_features.sh
-MODEL=V610 bash workflow/step4_extract_features.sh
-
-# 小样本：limit 对每个选中的 split 分别生效；必须选择新的输出目录。
-MODEL=V548 SPLITS="train valid test" LIMIT=17 \
-DATA_DIR=/path/to/windows OUT_DIR=/tmp/my_step4_smoke \
-  bash workflow/step4_extract_features.sh
-
-# 只处理 test 或选择另一层，不影响其他模型的配置。
-MODEL=V543 SPLITS=test HIDDEN_LAYER=6 OUT_DIR=/path/to/new/V543_layer6 \
-  bash workflow/step4_extract_features.sh
-```
-
-配置分为 `model`、`extraction`、`models`：
-
-- `model` 默认 V548；已提供 V011、V543、V548、V554、V610 条目。
-- `extraction` 控制输入、输出、`splits`、设备、批次、落盘精度和性能开关。默认 `splits: [train, valid, test]`，输入支持 `.jsonl.gz` 和 `.jsonl`。
-- `models.<名称>` 设置架构、encoder/base 路径、隐藏层及 ODE/token 协议，也可覆盖通用设置。未来模型直接新增条目即可。
-- 优先级：命令行 > 显式环境变量 > 当前模型条目 > `extraction` > 默认值。`MODEL` 和 `VERSION` 都可选模型，同时设置时 `MODEL` 优先。`EXTRACTION_CONFIG` 指定其他 YAML；`PYTHON_BIN` 指定解释器。
-- YAML 相对路径以项目根目录为基准；CLI/环境变量相对路径以启动目录为基准。`OUTPUT_ROOT` 在统一入口中表示 Step4 特征根目录。
-
-**输入路径需填写实际位置：**统一配置沿用 `output/step3_output/new` 的原约定；创建本入口时该目录不存在。先运行预览检查 `missing_inputs`，再修改 `extraction.data_dir`。默认输出为 `output/step4_output/<模型名>`，其中 V011 默认是 `V011`，而非旧 Diffusion Shell 的 `V011-ode097`；需要旧名称时明确设置 `out_dir`。已存在的输出目录会被拒绝，避免覆盖已有实验。
-
-统一入口默认落盘 FP16；BERT 主干批次 8，Diffusion/GPT 32；逐条 codec、模型设备 FP32 聚合。三类主干仍保持原来的计算精度与层选择规则。`pooling_device: cpu` 恢复原 CPU 聚合；`codec_batch_size > 1` 可尝试等长批量编码，但已有真实测试发现其卷积舍入误差可能改变量化 token，正式对比默认保持 1。所有字段均在 YAML 中注释。
-
-输出仍为 `streaming_memmap_v1`，可供原 Step5 裁剪和训练读取。一次加载模型后依次处理所选 split，所有 split 成功后发布输出目录，并保存 `resolved_extraction_config.json` 和 `feature_summary.json`。运行中的 YAML 修改只影响后续任务；输入窗口或模型配置发生变化会报错。`limit` 非空时汇总标记 `partial_extraction: true`。只提取 test 的目录不能直接用于要求 train/valid/test 齐全的训练版 Step5。
-
-2026-10-17 小样本验证：五个配置模型均通过 GPU 1 上的 `train/valid/test` 提取，每个 split 17 个窗口。测试使用真实 WGA 信号并人工交替设置标签，仅用于检查通用标签读取，不用于评估准确率；已核对样本顺序、FP16 缓存、Step5 清单读取、YAML 启动快照、已有输出拒绝覆盖、失败清理及输入变化检测。所有临时特征已清理，未运行全量提取。
-
-下面保留原有三个架构入口的用法及默认值，旧入口仍可使用。
-
-提取流程先将窗口信号通过 encoder 转成 token，再提取对应主干的隐藏状态，按碱基的信号跨度聚合为 `[N, W, H]`。`N` 为窗口数，`W` 为窗口碱基数，`H` 来自模型配置，常见为 768。
-
-```bash
-# BERT：默认模型是 V554；指定 MODEL_ROOT 可切换到 V543。
-MODEL_ROOT="$PROJECT_DIR/train/backbone/V543-BERT" \
-DATA_DIR="$PROJECT_DIR/output/step3_output/new" \
-OUT_DIR="$PROJECT_DIR/output/step4_output/V543" \
-DEVICE=cuda:0 \
-  bash workflow/step4_extract_window_hidden_states_BERT-js.sh
-
-# V554 使用相同 BERT 入口。
-MODEL_ROOT="$PROJECT_DIR/train/backbone/V554-BERT" \
-OUT_DIR="$PROJECT_DIR/output/step4_output/V554" \
-  bash workflow/step4_extract_window_hidden_states_BERT-js.sh
-
-# Diffusion 和 GPT 使用各自的入口。
-DEVICE=cuda:0 bash workflow/step4_extract_window_hidden_states_Diffusion-kx.sh
-DEVICE=cuda:0 bash workflow/step4_extract_window_hidden_states_GPT.sh
-```
-
-| 入口 | 默认输出目录，相对项目根目录 | 关键默认参数 |
-| --- | --- | --- |
-| BERT | `output/step4_output/V554` | `ENCODER_LAYER=0`、`HIDDEN_LAYER=-1`、`BATCH_SIZE=8`、`DTYPE=float16` |
-| Diffusion | `output/step4_output/V011-ode097` | `ENCODER_LAYER=0`、`HIDDEN_SOURCE=ode_hidden`、`ODE_STEPS=1`、`ODE_START_T=0.97`、`ODE_SELF_COND_CFG_SCALE=0.5` |
-| GPT | `output/step4_output/V610` | `ENCODER_LAYER=1`、`DECODER_LAYERS=last`、`TOKEN_ID_MODE=auto`、`SPECIAL_TOKENS=none` |
-
-三个入口默认 `WINDOW_SIZE=15`、`PREPROCESS=none`。Diffusion/GPT 默认 `BATCH_SIZE=4`、`DTYPE=float32`。调整 batch、层选择或 token 设置时，使用新的输出目录，并记录相应配置。
-
-先用 `LIMIT=20 OUT_DIR=/path/to/new_smoke_features` 小规模验证。正式提取完成后，检查 `feature_summary.json` 的记录数、跳过原因和截断统计；不同模型可能因长度限制保留不同样本，比较结果前应核对样本集合。
-
-每个 split 的输出包括：
-
-```text
-train.pt                    # streaming_memmap_v1 小清单，不是全部特征张量
-train.features.f16.bin      # float32 时为 train.features.f32.bin
-train.labels.f32.bin
-metadata_train.tsv
-valid.pt / valid.* / metadata_valid.tsv
-test.pt / test.* / metadata_test.tsv
-feature_summary.json
-```
-
-移动特征时应保留 `.pt` 引用的 `.bin` 和对应 TSV。仅复制 `.pt` 无法训练；`.partial` 文件也不能作为已完成输入。Step4 的 JSONL 窗口应包含非空有限值信号、二分类标签、序列/参考序列、碱基信号跨度以及 read ID、染色体和中心位置等元数据。
-
-## 7. Step5：中心裁剪为 5-mer、7-mer 等
-
-[裁剪脚本](workflow/step5_center_crop_features.py) 读取三种提取入口输出的 `streaming_memmap_v1` 格式，分块写出新特征。裁剪长度必须为不小于 5、且不超过原窗口长度的奇数。
-
-裁剪同时更新 TSV 的 `seq/ref`，保留原序列及裁剪偏移，保持标签、样本顺序和原始基因组/信号坐标。它保留原主干上下文，仅截取输出表征，不等同于将更短信号重新输入主干。
-
-```bash
-INPUT_DIR="$PROJECT_DIR/output/step4_output/V543" \
-OUT_DIR="$PROJECT_DIR/train/data/V543_center7" \
-TRAIN_CONFIG="$PROJECT_DIR/train/run/V543-v2/config.yaml" \
-WINDOW_SIZE=7 EXPERIMENT=V543-center7 \
-  bash workflow/step5_center_crop_features.sh
-
-# 使用生成的配置，其中 feature_dir 和 fusion_window_size 已同步更新。
-WANDB_MODE=offline bash train/run/example/run.sh \
-  "$PROJECT_DIR/train/data/V543_center7/train_config.yaml"
-```
-
-`TRAIN_CONFIG` 是训练超参数模板，不是模型配置；脚本生成新目录中的 `train_config.yaml`，不会修改模板。Bash 默认输入、输出和模板均对应 V610；切换模型时应同时指定这三个路径。V011 通常对应 `output/step4_output/V011-ode097`、`train/data/V011-V2` 和 `train/run/V011-v2/config.yaml`。
-
-名称含 `center_5mer` 的 Linear、Gaussian Pool、Learned Pool、MLP、DWConv 头固定使用中心 5 个位置；`center_base` 只使用中心位置。融合头 `center_5mer_emb8_none` 按 `fusion_window_size` 取窗口，因此使用生成配置可比较 5/7/9-mer 融合实验。
-
-裁剪期间不要修改源特征、元数据或模板 YAML。脚本结束前会检查这些文件是否变化，变化时拒绝发布输出；每个 split 的 `[DONE]` 不代表整个任务完成，以最终 `[SUCCESS]` 为准。输出目录必须不存在，已有目录不会被覆盖。
-
-## 8. 分类训练配置
-
-完整参数及中文注释见 [example/config.yaml](train/run/example/config.yaml)。启动脚本支持一个可选的 YAML 路径，其后的参数转交 `train.py`；命令行参数优先于 YAML。
-
-| 配置入口 | 默认特征目录，相对 `train/` | 分类头数 × seed 数 | 最大轮数 / 早停 patience |
-| --- | --- | --- | --- |
-| [V011-v2](train/run/V011-v2/config.yaml) | `data/V011-V2` | 5 × 3 | 80 / 6 |
-| [V543-v2](train/run/V543-v2/config.yaml) | `data/V543-V2` | 5 × 3 | 80 / 6 |
-| [V610-v2](train/run/V610-v2/config.yaml) | `data/V610-V2` | 5 × 3 | 80 / 6 |
-| [V554-v1](train/run/V554-v1/config.yaml) | `../output/step4_output/V554` | 4 × 3 | 80 / 12 |
-| [example](train/run/example/config.yaml) | `../output/step4_output/V554` | 6 × 3 | 80 / 12 |
-
-V554-v1 的默认 `experiment` 名为 `V554`。上述配置默认使用 `cuda:0` 和 `cuda:1`；单卡机器可用 `--device cuda:0` 覆盖。`devices` 表示在不同 GPU 上调度独立的“分类头 × seed”任务，每个任务占一个 GPU，不是同一个模型的 DDP 训练。
-
-### 支持的分类头
+**目录名不决定训练内容。** 当前 `train/run/V548-V2/config.yaml` 指向 `data/V554-V2`、experiment 为 `V554-v2`；`train/run/V554-V2/config.yaml` 则指向 V548。使用这两个入口前应核对实际配置，或像上文那样使用 Step5 生成的配置。本 README 更新没有改动这些实验设置。
 
 | `strategy` | 输入与结构 |
 | --- | --- |
-| `center_base_linear_raw768` | 中心一个碱基表征，LayerNorm + Linear |
+| `center_base_linear_raw768` | 中心碱基表征，LayerNorm + Linear |
 | `center_5mer_linear_raw768` | 中心 5 个表征，归一化后展开 + Linear |
-| `center_5mer_gaussian_pool_linear_raw768` | 中心 5 个表征，固定高斯权重池化 + Linear |
-| `center_5mer_learned_pool_linear_raw768` | 中心 5 个表征，可学习的全局位置权重池化 + Linear |
+| `center_5mer_gaussian_pool_linear_raw768` | 固定高斯位置权重池化 + Linear |
+| `center_5mer_learned_pool_linear_raw768` | 可学习的全局位置权重池化 + Linear |
 | `center_5mer_mlp_raw768` | 中心 5 个表征，MLP |
 | `center_5mer_residual_dwconv_raw768` | 中心 5 个表征，残差深度卷积分类头 |
-| `center_5mer_emb8_none` | 信号表征分支 + 8 维碱基 Embedding 分支，BiLSTM 融合 |
+| `center_5mer_emb8_none` | 信号分支 + 8 维碱基 Embedding，BiLSTM 融合 |
 
-`raw768` 是策略的历史名称，实际隐藏维度从输入特征读取。融合头不依赖额外统计量 TSV，碱基来自元数据中的 `ref` 或 `seq`，由 `base_source` 决定。
+`raw768` 是历史策略名称，实际维度从特征读取。融合头的碱基由 `base_source: ref/seq` 决定，不需要额外统计量 TSV。
 
-### 训练、早停和读取性能
+- **任务调度**：每个“分类头 × seed”为独立任务；`devices: [cuda:0, cuda:1]` 在多 GPU 上调度任务，不是单个模型的 DDP。`--device cuda:0` 可覆盖多卡配置。
+- **早停**：每轮检查 valid 的 read/window 指标。默认监控 AUROC，连续 `patience` 轮没有严格提升则早停；相同分数也计为未提升。指标不可计算时回退到验证 loss，loss 越低越好。
+- **最佳权重**：最终 valid/test 评估使用最佳验证轮次的 `best.pt`；它不是包含完整优化器状态的断点续训文件。
+- **阈值**：`training.threshold` 默认 0.5，影响 accuracy、F1 和混淆矩阵，不影响 AUROC/AUPRC。阈值选择使用 valid，随后固定用于 test。
+- **数据检查**：`check_site_overlap` 检查染色体和中心位点是否跨 split 重叠；标签、特征和 TSV 行数必须一致。
+- **完成任务复用**：`skip_completed` 会核对配置、输入签名和代码，条件匹配才跳过完整结果；新实验使用新的 `experiment`。
 
-- `batch_size`、`eval_batch_size` 分别控制每个任务的训练和评估 batch。`strategy_overrides` 可为特定分类头覆盖训练参数；现有配置对融合头使用更小的 batch。
-- `batch_read: true` 启用批量 memmap 读取。随机训练 batch 按磁盘行号排序读取，再恢复采样顺序；评估通常按连续切片读取。
-- `num_workers` 是每个训练任务的 DataLoader worker 数，`eval_num_workers` 单独控制评估。`prefetch_factor` 和 `persistent_workers` 在 worker 数大于 0 时生效。多 GPU 任务会分别占用 CPU、预取内存和磁盘带宽，worker 数应结合实际吞吐调整。
-- `log_every_steps` 控制训练日志间隔，并额外输出首尾 batch；设为 `0` 关闭 step 日志，仍保留 epoch 记录。日志中的 `data_wait_s` 是当前日志区间等待 batch 的累计时间，`eta_s` 估计当前 epoch 剩余训练时间。
-- 每轮在 valid 的 read/window 层面评估。默认按 `monitor_metric: auroc` 保存最佳模型；连续 `patience` 轮没有严格提升即早停，相同分数也计为未提升。选择 `loss` 时越低越好；指定指标无法计算时回退到验证 loss。
-- `threshold: 0.5` 用于概率转标签，影响 accuracy、F1 等，不影响 AUROC、AUPRC。需要选阈值时在 valid 上选择，再固定用于 test。
-- `check_site_overlap: true` 检查三个 split 是否有相同染色体和中心坐标。三组数据的窗口长度、隐藏维度及特征/元数据行数必须匹配。
-- `skip_completed: true` 仅在配置、输入签名和代码匹配时跳过完整实验。`best.pt` 保存最佳分类头权重，不含用于断点续训的完整优化器状态。更改实验设置时使用新的 `experiment`。
+### 读取性能与 W&B
 
-### 输出与指标
+`batch_read` 用于批量读取 memmap；`num_workers` 和 `eval_num_workers` 分别控制训练与评估的数据加载。先看日志中的 `data_wait_s`，再判断是否需要调整读取方式或 worker 数。
+
+`training.gpu_cache` 可将已提取的特征缓存到 GPU，供多个训练 epoch 复用；可配置缓存 split、容量上限、预留显存及不足时回退。它与 Step4 的主干推理加速是不同阶段，不能直接省去 encoder/主干计算。实现见 [gpu_feature_cache.py](train/gpu_feature_cache.py)。
+
+W&B 由 [wandb_tracking.py](train/wandb_tracking.py) 管理，每个分类头/seed 对应一个 run。其他账号应修改 YAML 中的 `wandb.entity`；`WANDB_MODE=offline` 可保存离线记录。若无需 W&B，设置 `wandb.enabled: false`，此时无需安装 SDK。离线模式仍需 SDK。
+
+## 输出与指标
+
+### 特征缓存
+
+```text
+<Step4 输出目录>/
+├── train.pt / valid.pt / test.pt        # streaming_memmap_v1 清单
+├── train.features.f16.bin              # float32 时为 .f32.bin；其他 split 同理
+├── train.labels.f32.bin
+├── metadata_train.tsv                  # 每行对应一个窗口
+├── ...
+├── feature_summary.json
+└── resolved_extraction_config.json     # 统一入口实际使用的配置
+```
+
+特征形状为 `[N, W, H]`：窗口数、碱基位置数、隐藏维度。移动缓存时应整体保留 `.pt`、`.bin` 和 TSV；仅复制 `.pt` 无法训练。`.partial` 文件不是已完成结果。
+
+### 分类训练结果
 
 ```text
 train/output/<experiment>/
 ├── scheduling.json
-├── summary.tsv                         # 每个分类头、每个 seed 的结果
+├── summary.tsv                         # 每个分类头 / seed 的指标
 ├── aggregate.tsv                       # 跨 seed 的均值、样本标准差和方差
 └── runs/<strategy>_seed<N>/
-    ├── resolved_config.yaml
-    ├── config.json
-    ├── train.log
-    ├── history.jsonl
+    ├── resolved_config.yaml / config.json
+    ├── train.log / history.jsonl
     ├── best.pt
     ├── metrics.json
-    ├── test_predictions.tsv            # save_predictions: test 时
+    ├── test_predictions.tsv            # 开启预测保存时
     └── test_site_predictions.tsv
 ```
 
-最终评估使用最佳验证轮次的权重，默认评估 valid 和 test；`evaluate_train: true` 可额外评估 train。read/window 层面以每条窗口为样本；site 层面按位点汇总窗口预测概率的均值。`metrics.json` 包含对应的二分类指标；汇总表记录 accuracy、F1、AUROC 和 AUPRC。跨 seed 的标准差/方差使用 `ddof=1`。
+| 层面 | 样本 / 聚合定义 | 主要指标 |
+| --- | --- | --- |
+| Read/window | 一个导出的 read-window；不等于一条唯一的完整 read | Accuracy、F1、AUROC、AUPRC、loss、混淆矩阵 |
+| Site | 按 `chrom + center_genome_pos0 + strand + source` 分组，取窗口概率算术均值 | Accuracy、F1、AUROC、AUPRC |
 
-## 9. W&B 实验记录
+AUPRC 在代码中按 average precision 计算。跨 seed 的标准差/方差使用 `ddof=1`，表示训练随机种子的变动，不是独立生物重复的变动。`evaluate_train: true` 可增加 train 的最终评估；valid/test 始终评估。
 
-[wandb_tracking.py](train/wandb_tracking.py) 由训练入口调用，应与训练代码一起保留。V011-v2、V543-v2、V610-v2 默认启用 W&B，仓库配置中的 entity 是原实验账号；其他账号运行时应修改为有权限的个人或团队 entity。
+## Test1：WGA UNMOD 假阳性评测
 
-```yaml
-wandb:
-  enabled: true
-  project: DNA-5mc-classifier
-  entity: null             # 使用当前登录账号，或填自己的团队名
-  name: null               # 默认 experiment/strategy_seedN
-  group: null              # 默认 experiment
-  mode: online             # online、offline、disabled
-  tags: [V543]
-```
+方案见 [eval/Test1/README.md](eval/Test1/README.md)，脚本说明见 [eval/Test1/workflow/README.md](eval/Test1/workflow/README.md)。这套评测使用 WGA 实验文库作为阴性对照，所有窗口标记为 0，构建窗口时不需要 bedMethyl。
 
-```bash
-# 在线模式：先登录，再使用自己的 entity 配置运行。
-"$PYTHON_BIN" -m wandb login
-bash train/run/V543-v2/run.sh
-
-# 离线模式：覆盖 mode，训练记录保存在本地。
-WANDB_MODE=offline bash train/run/V543-v2/run.sh
-```
-
-每个分类头/seed 对应一个 run，记录 step loss、学习率、吞吐、等待时间，以及 epoch 验证指标和最终评估结果。运行目录中另有 `wandb/` 和 `wandb_run.json`。`wandb.enabled: false` 可完全关闭记录，此时无需安装 W&B SDK；关闭后仅设置 `WANDB_MODE` 不会重新启用记录。
-
-## 10. 运行前检查与常见问题
+| Test1 步骤 | 功能 |
+| --- | --- |
+| Step1 | 从已预处理的全 read JSONL 提取正链窗口，去重、计算位点覆盖度并保存审计索引 |
+| Step2 | 按独立配置提取 test 特征，并补充文库和质量字段 |
+| Step3 | 可选：裁剪中心窗口；评测器也支持读取较宽特征后按分类头要求中心裁剪 |
+| Step4 | 加载已训练的 `best.pt`，计算 read/site 假阳性，不训练模型 |
+| Step5 | 汇总 seed，并匹配不同模型共同保留的样本 |
 
 ```bash
-# 只检查路径和即将执行的命令，不需要准备完整数据。
-DRY_RUN=1 bash workflow/step4_extract_window_hidden_states_BERT-js.sh
-DRY_RUN=1 bash workflow/step5_center_crop_features.sh
-DRY_RUN=1 bash train/run/V543-v2/run.sh
+# 预览 Test1 特征提取配置，与训练版 Step4 配置相互独立。
+VERSION=V610 DRY_RUN=1 bash eval/Test1/workflow/step2_extract_features.sh
 
-# 已准备数据后，执行真实输入检查。
-bash train/run/V543-v2/run.sh --dry-run
+# 已有阴性特征和分类头时评测；四个路径/版本参数应一起匹配。
+VERSION=V610 RUNS_ROOT="$PROJECT_DIR/train/output/V610-v2" \
+CROPPED_DIR=/path/to/Test1/features/V610 RESULTS_DIR=/path/to/new/Test1/results/V610 \
+DEVICE=cuda:0 bash eval/Test1/workflow/step4_evaluate.sh
 ```
 
-- **找不到 config.yaml**：检查指定文件是否存在，并区分项目名中的 `DNA-5mC` 与旧目录 `DNA-5mc`。Step5 的 `TRAIN_CONFIG` 应指向本仓库内的训练 YAML。
-- **裁剪过程中源文件发生变化**：报错路径可能是特征、TSV，也可能是模板 YAML。保持这些输入不变后重新裁剪；需要编辑训练参数时，可先复制模板，并将 `TRAIN_CONFIG` 指向固定副本。
-- **启动后长时间没有训练 step**：启动阶段会读取清单、核对标签/元数据、检查位点交集；这部分发生在首个 batch 之前。根据日志区分输入检查、训练和验证阶段。
-- **训练等待数据时间高**：检查特征所在磁盘、并发读任务和可用内存。优先使用中心裁剪缓存、本地较快磁盘和 `batch_read: true`，再比较适量 worker 的吞吐。
-- **GPU 编号不可用**：用 `--device cuda:0` 或 `--device cpu` 覆盖多 GPU 配置；CPU 可用于小规模验证。
-- **W&B 初始化失败**：核对登录状态和 entity 权限，或使用 `WANDB_MODE=offline` / `enabled: false`。
+约 5× 总体测序深度不等于每个位点恰好 5 条 read，应使用实际覆盖度。报告 `FPR = FP / (FP + TN)`、specificity、样本数及覆盖度/序列上下文分层；全阴性集合无法估计对阳性样本的灵敏度或有意义的二分类 AUROC。
 
-`.gitignore` 已排除外部模型目录、数据、特征、权重、日志及运行结果。迁移到新机器时，需要重新准备这些文件，并检查路径；克隆代码本身不会恢复本地模型软链接或实验数据。
+`coverage_metrics.tsv` 是 **site-level** 覆盖度分层，不应直接解释为 read-level FPR；累计覆盖度筛选结果见 `metrics.json` 的 `min_coverage`。比较模型时固定阈值、覆盖度范围、文库和样本集合，避免将不同过滤条件混在同一张表中。
+
+Test1 的 Shell 保存了具体实验路径，切换 `VERSION` 时需要同步特征、训练结果和输出路径。当前 `run_all.sh --test` 引用的 `test_step2_config.py` 不在工作区中，不能把它视为已可用的一键自测入口；可先逐步使用配置预览和受限小样本检查。
+
+## 常见问题
+
+| 现象 | 检查方式 |
+| --- | --- |
+| 找不到 Step4 配置 | 当前 YAML 在 `workflow/config/step4_config.yaml`。Shell 已使用该路径；直接调用 Python 应显式传 `--config`，其代码默认路径仍是旧位置。 |
+| 模型或数据路径不存在 | 核对软链接目标、YAML 绝对路径，以及 `DNA-5mC` / `DNA-5mc` 的大小写；克隆代码不会恢复外部文件。 |
+| `No module named torch/numpy` | 核对 `PYTHON_BIN` 和实际 Conda 环境，不能仅依据终端显示的环境名称。 |
+| `No space left on device` | 检查输出目录所在文件系统的空间和 inode：`df -h /path/to/output`、`df -i /path/to/output`；这是磁盘写入问题。 |
+| CUDA OOM | 区分主干推理批次、分类头训练批次和 GPU 特征缓存容量，调整对应参数。 |
+| `devices` 解析错误 | YAML 列表元素需用逗号分隔，例如 `[cuda:0, cuda:1]`。 |
+| 裁剪提示输入发生变化 | 源特征、TSV 和模板 YAML 都可能被检查；保持输入稳定，使用最终成功提示判断是否完成。 |
+| 启动后暂时没有训练 step | 启动阶段可能正在检查清单、元数据和跨 split 位点；先查看日志阶段。 |
+| 不同主干的样本数不一致 | 检查 Step4 的跳过、超长和截断统计，比较时匹配共同窗口/位点。 |
+
+`DRY_RUN=1 bash ...` 通常只预览；训练入口的 `--dry-run` 会读取真实输入并检查任务，大数据下仍可能耗时。统一 Step4 的 `--print-plan` 解析配置和模型配置路径，但不加载权重。
+
+`.gitignore` 排除了模型、特征、权重、日志和运行结果。迁移环境时，应另外保存数据与模型位置、实际配置、split 信息及结果清单，不能仅依赖 Git 中的代码。
