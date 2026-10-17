@@ -31,6 +31,8 @@ DNA-5mC/
 │   ├── step3_run_balance_chr19.sh
 │   ├── step3.1_extract_chr19_small.py           # 可选：抽取小数据集
 │   ├── step3.2_filter_chr19_mapq.py             # 可选：提高 MAPQ / 覆盖度要求
+│   ├── step4_extract_features.{py,sh}   # 统一 YAML 配置入口
+│   ├── step4_config.yaml
 │   ├── step4_extract_window_hidden_states_BERT-js.{py,sh}
 │   ├── step4_extract_window_hidden_states_Diffusion-kx.{py,sh}
 │   ├── step4_extract_window_hidden_states_GPT.{py,sh}
@@ -226,6 +228,45 @@ ln -s "$PROJECT_DIR/output/step3_output/chr16/test.jsonl.gz" \
 可选使用 [Step3.1](workflow/step3.1_extract_chr19_small.py) 抽取小数据集，或 [Step3.2](workflow/step3.2_filter_chr19_mapq.py) 按更高 MAPQ 和实际覆盖度筛选。筛选后的类别比例需重新检查。各 Bash 入口保存了具体实验的默认路径，衔接时应显式设置 `INPUT_DIR`、`OUT_DIR`，不要假定所有默认值可直接串联。
 
 ## 6. Step4：提取主干特征
+
+推荐使用新增的统一入口 [step4_extract_features.sh](workflow/step4_extract_features.sh)，参数集中在 [step4_config.yaml](workflow/step4_config.yaml)。Python 入口 [step4_extract_features.py](workflow/step4_extract_features.py) 复用原有三类提取器，支持任意兼容的新版本名；只复用 Test1 的通用配置/I/O 工具，不要求 WGA 标签、`dataset_manifest.json` 或 `sample_audit.sqlite`。
+
+```bash
+# 预览：不加载权重、不创建输出，显示缺失的输入 split。
+DRY_RUN=1 bash workflow/step4_extract_features.sh
+
+# 正式：先在 YAML 中填写实际 data_dir，再选择模型。
+MODEL=V548 bash workflow/step4_extract_features.sh
+MODEL=V011 bash workflow/step4_extract_features.sh
+MODEL=V610 bash workflow/step4_extract_features.sh
+
+# 小样本：limit 对每个选中的 split 分别生效；必须选择新的输出目录。
+MODEL=V548 SPLITS="train valid test" LIMIT=17 \
+DATA_DIR=/path/to/windows OUT_DIR=/tmp/my_step4_smoke \
+  bash workflow/step4_extract_features.sh
+
+# 只处理 test 或选择另一层，不影响其他模型的配置。
+MODEL=V543 SPLITS=test HIDDEN_LAYER=6 OUT_DIR=/path/to/new/V543_layer6 \
+  bash workflow/step4_extract_features.sh
+```
+
+配置分为 `model`、`extraction`、`models`：
+
+- `model` 默认 V548；已提供 V011、V543、V548、V554、V610 条目。
+- `extraction` 控制输入、输出、`splits`、设备、批次、落盘精度和性能开关。默认 `splits: [train, valid, test]`，输入支持 `.jsonl.gz` 和 `.jsonl`。
+- `models.<名称>` 设置架构、encoder/base 路径、隐藏层及 ODE/token 协议，也可覆盖通用设置。未来模型直接新增条目即可。
+- 优先级：命令行 > 显式环境变量 > 当前模型条目 > `extraction` > 默认值。`MODEL` 和 `VERSION` 都可选模型，同时设置时 `MODEL` 优先。`EXTRACTION_CONFIG` 指定其他 YAML；`PYTHON_BIN` 指定解释器。
+- YAML 相对路径以项目根目录为基准；CLI/环境变量相对路径以启动目录为基准。`OUTPUT_ROOT` 在统一入口中表示 Step4 特征根目录。
+
+**输入路径需填写实际位置：**统一配置沿用 `output/step3_output/new` 的原约定；创建本入口时该目录不存在。先运行预览检查 `missing_inputs`，再修改 `extraction.data_dir`。默认输出为 `output/step4_output/<模型名>`，其中 V011 默认是 `V011`，而非旧 Diffusion Shell 的 `V011-ode097`；需要旧名称时明确设置 `out_dir`。已存在的输出目录会被拒绝，避免覆盖已有实验。
+
+统一入口默认落盘 FP16；BERT 主干批次 8，Diffusion/GPT 32；逐条 codec、模型设备 FP32 聚合。三类主干仍保持原来的计算精度与层选择规则。`pooling_device: cpu` 恢复原 CPU 聚合；`codec_batch_size > 1` 可尝试等长批量编码，但已有真实测试发现其卷积舍入误差可能改变量化 token，正式对比默认保持 1。所有字段均在 YAML 中注释。
+
+输出仍为 `streaming_memmap_v1`，可供原 Step5 裁剪和训练读取。一次加载模型后依次处理所选 split，所有 split 成功后发布输出目录，并保存 `resolved_extraction_config.json` 和 `feature_summary.json`。运行中的 YAML 修改只影响后续任务；输入窗口或模型配置发生变化会报错。`limit` 非空时汇总标记 `partial_extraction: true`。只提取 test 的目录不能直接用于要求 train/valid/test 齐全的训练版 Step5。
+
+2026-10-17 小样本验证：五个配置模型均通过 GPU 1 上的 `train/valid/test` 提取，每个 split 17 个窗口。测试使用真实 WGA 信号并人工交替设置标签，仅用于检查通用标签读取，不用于评估准确率；已核对样本顺序、FP16 缓存、Step5 清单读取、YAML 启动快照、已有输出拒绝覆盖、失败清理及输入变化检测。所有临时特征已清理，未运行全量提取。
+
+下面保留原有三个架构入口的用法及默认值，旧入口仍可使用。
 
 提取流程先将窗口信号通过 encoder 转成 token，再提取对应主干的隐藏状态，按碱基的信号跨度聚合为 `[N, W, H]`。`N` 为窗口数，`W` 为窗口碱基数，`H` 来自模型配置，常见为 768。
 

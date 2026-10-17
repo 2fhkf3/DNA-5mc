@@ -1,0 +1,95 @@
+# 统一 Step4，支持 BERT / Diffusion / GPT 和后续兼容架构的新模型版本。
+# 启动：bash workflow/step4_extract_features.sh
+# 预览：DRY_RUN=1 bash workflow/step4_extract_features.sh
+# 切换：MODEL=V011 bash workflow/step4_extract_features.sh
+# YAML 内的相对路径以 DNA-5mC 项目根目录为基准，不受启动目录影响。
+# CLI/环境变量中的相对路径以启动目录为基准。
+
+model: V548                 # 本次选择 models 中哪个条目；每次只加载一个模型。
+
+extraction:
+  # 填写实际 Step3/筛选后的窗口目录，含以下 splits 对应的 .jsonl.gz 或 .jsonl。
+  # 此处沿用原脚本路径约定；当前工作区未发现该目录，正式运行前必须修改。
+  data_dir: /home/shj/ZJ-lab/Modification/DNA-5mc/output/step3_output/new
+  splits: [train, valid, test]  # 可改成 [test]；不需要 Test1 的 WGA 清单或审计数据库。
+  output_root: /mnt/nas_data/shenhaojie/step4-output_dir  # 默认输出 <output_root>/<模型名>，例如 output/step4_output/V548。
+  out_dir: null             # 非 null 时直接写此目录；已有目录拒绝覆盖，请为新实验指定新路径。
+  device: cuda:0            # auto / cpu / cuda:0 / cuda:1；auto 有 GPU 时选择 cuda:0。
+  cpu_threads: 4            # CPU 算子线程数。
+  batch_size: 8             # 主干推理批次；模型条目可覆盖，OOM 时自动拆小。
+  dtype: float16            # float16 / float32：仅控制特征落盘精度，不修改主干计算精度。
+  window_size: 15           # 输入窗口的碱基位置数；Step5 再裁剪中心 5/7/... 个位置。
+  preprocess: none          # 输入已预处理时使用 none；auto 使用 encoder 自带预处理器。
+  save_every: 1024          # 完成多少个窗口后批量写盘，控制 CPU 缓冲区大小。
+  log_every: 1000           # 进度日志间隔；0 禁用常规进度日志。
+  limit: null               # 每个 split 最多读取 N 个窗口，仅小测试使用；正式保持 null。
+  codec_batch_size: 1       # 1 沿用逐条 codec；>1 等长批量编码可能改变量化 token，验证后再启用。
+  codec_buffer_size: 1024   # 仅批量 codec 使用；按精确长度分组，不补零，恢复原始输出顺序。
+  pooling_device: model     # model：在模型设备上 FP32 聚合后传回 CPU；cpu：原 CPU 聚合。
+  # 聚合求和顺序不同会产生微小舍入误差。恢复原路径用 pooling_device: cpu。
+  # 模型条目优先于 extraction；环境变量和 CLI 可继续覆盖。
+
+models:
+  V548:
+    architecture: bert
+    model_root: train/backbone/V548-BERT
+    encoder_dir: null       # null 自动使用 model_root/encoder。
+    decoder_dir: null       # null 优先使用 model_root/base；多个候选时必须明确指定。
+    encoder_layer: 0        # codec 量化轨道参数，保持与预训练/原提取协议一致。
+    hidden_layer: -1        # BERT hidden_states 索引：0=embedding，1=首层，-1=最后 Transformer 输出。
+    token_offset: 128       # codec ID → BERT 词表偏移，不随意改变。
+    batch_size: 8           # 保留原 BERT 批次形状；调整批次也可能产生数值差异。
+
+  V543:
+    architecture: bert
+    model_root: train/backbone/V543-BERT
+    encoder_layer: 0
+    hidden_layer: -1
+    token_offset: 128
+    batch_size: 8
+
+  V554:
+    architecture: bert
+    model_root: train/backbone/V554-BERT
+    encoder_layer: 0
+    hidden_layer: -1
+    token_offset: 128
+    batch_size: 8
+
+  V011:
+    architecture: diffusion
+    model_root: train/backbone/V011-Diffusion
+    # 根目录存在多个 checkpoint，明确选择原实验的 CLS step65000 版本。
+    decoder_dir: train/backbone/V011-Diffusion/hf_dlm_elf_mixed_with_cls_token_step65000-unsharded
+    encoder_layer: 0
+    hidden_source: ode_hidden  # ode_hidden / context_hidden / last_hidden / last_hidden_state。
+    ode_steps: 1             # ODE 步数，ode_hidden 使用。
+    ode_start_t: 0.97        # ODE 起始时间，取值 (0,1]。
+    ode_self_cond_cfg_scale: 0.5  # ODE 自条件 CFG 系数。
+    last_t: 1.0             # last_hidden 的时间参数，取值 (0,1]。
+    batch_size: 32
+    # 本入口默认输出 output/step4_output/V011；需要旧目录名 V011-ode097 时设置 out_dir。
+
+  V610:
+    architecture: gpt
+    model_root: train/backbone/V610-GPT
+    encoder_layer: 1
+    decoder_layers: last    # last / embed / 从 0 开始的 Transformer 层编号（如 8）。
+    selected_layer_name: null  # 多选如 [embed,8] 时，必须指定 embed / layer_8 中的一层。
+    token_id_mode: auto     # auto/tokenizer/offset/direct；auto 通过模型 tokenizer 映射 ID。
+    tokenizer_file: null   # null 使用主干目录 tokenizer.json。
+    token_offset: 128      # token_id_mode=offset 时生效。
+    special_tokens: none   # none / bos_eos；必须与主干训练协议一致。
+    codec_mode: auto       # auto 绕过无用重建；reference 调用 codec 原始接口。
+    max_tokens: null       # null 使用主干上限；整数设置更严格上限，含特殊 token。
+    overlong_policy: skip  # skip 跳过并统计；error 遇到超长立即报错。
+    batch_size: 32
+
+  # 新版本直接添加条目，不需要增加 Python 版本分支。例如：
+  # V555:
+  #   architecture: bert
+  #   model_root: /absolute/path/to/V555
+  #   hidden_layer: -1
+  #   encoder_layer: 0
+  #   token_offset: 128
+  # 也可分别指定 encoder_dir / decoder_dir，architecture 可用 auto 从 config.json 推断。
