@@ -537,9 +537,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def validate_args(args: argparse.Namespace) -> None:
+def validate_args(args: argparse.Namespace, *, model_name='V011') -> None:
     validate_extraction_performance(args)
-    for path, label in ((args.encoder_dir, 'V011 encoder'), (args.decoder_dir, 'V011 ELF DLM')):
+    for path, label in ((args.encoder_dir, f'{model_name} encoder'), (args.decoder_dir, f'{model_name} DLM')):
         for filename in ('config.json', 'model.safetensors'):
             if not (path / filename).is_file():
                 raise FileNotFoundError(f'{label}: missing {path / filename}')
@@ -551,7 +551,7 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.window_size % 2 != 1:
         raise ValueError('--window-size must be odd for a centered base window')
     if args.encoder_layer != 0:
-        raise ValueError('V011 has one FSQ codebook; --encoder-layer must be 0')
+        raise ValueError(f'{model_name} has one FSQ codebook; --encoder-layer must be 0')
     if args.limit is not None and args.limit < 1:
         raise ValueError('--limit must be >= 1')
     if args.log_every < 0:
@@ -662,13 +662,16 @@ def prepare_output(args):
             path.unlink()
 
 
-def build_split(split, encoder, decoder, preprocessor, args, device, protocol) -> dict[str, Any]:
+def build_split(split, encoder, decoder, preprocessor, args, device, protocol, *, backend=None) -> dict[str, Any]:
+    # Other DLM backends may reuse window alignment and streaming I/O while
+    # supplying their own inference and provenance. V011 remains the default.
+    backend = sys.modules[__name__] if backend is None else backend
     input_path = split_input_path(args.data_dir, split)
     input_stat = input_path.stat()
     writer = StreamingSplitWriter(
         out_dir=args.out_dir, split=split, window_size=args.window_size,
         hidden_size=protocol.hidden_size, dtype=args.dtype, save_every=args.save_every,
-        feature_source=feature_source(args),
+        feature_source=backend.feature_source(args),
     )
     pending = []
     seen = skipped = truncated = truncated_span_skips = 0
@@ -677,7 +680,7 @@ def build_split(split, encoder, decoder, preprocessor, args, device, protocol) -
     def flush_batch():
         if not pending:
             return
-        arrays = infer_batch(pending, decoder, args, protocol, device)
+        arrays = backend.infer_batch(pending, decoder, args, protocol, device)
         for item, hidden in zip(pending, arrays):
             label = int(item.source['label'])
             feature = hidden.numpy() if getattr(args, 'pooling_device', 'cpu') == 'model' else hidden_to_base_window(hidden, item)
@@ -728,7 +731,7 @@ def build_split(split, encoder, decoder, preprocessor, args, device, protocol) -
         if (current_stat.st_size, current_stat.st_mtime_ns) != (input_stat.st_size, input_stat.st_mtime_ns):
             raise RuntimeError(f'Input changed during extraction: {input_path}')
         manifest = writer.finalize()
-        manifest.update(extraction_metadata(args, protocol))
+        manifest.update(backend.extraction_metadata(args, protocol))
         torch.save(manifest, writer.manifest_partial)
         writer.manifest_partial.replace(writer.manifest_path)
     except BaseException:

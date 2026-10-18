@@ -146,7 +146,7 @@ def validate(s):
         depth = read_json(s['decoder_dir']/'config.json').get('num_hidden_layers')
         if depth is not None and not -(depth+1) <= s['hidden_layer'] <= depth:
             raise ValueError(f'hidden_layer outside available {depth+1} hidden states')
-    elif s['architecture'] == 'diffusion':
+    elif s['architecture'] in ('diffusion', 'flow_matching'):
         if s['encoder_layer'] != 0:
             raise ValueError('Current PoreDLM extractor supports encoder_layer=0')
         if s['hidden_source'] not in ('ode_hidden', 'context_hidden', 'last_hidden', 'last_hidden_state'):

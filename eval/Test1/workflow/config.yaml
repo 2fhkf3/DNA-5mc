@@ -4,7 +4,7 @@
 # 预览最终配置：DRY_RUN=1 bash eval/Test1/workflow/step2_extract_features.sh
 # 所有 YAML 相对路径均以 DNA-5mC 项目根目录为基准；支持绝对路径和 ~。
 
-model: V011                  # 当前选择的 models 条目；V610 是 GPT 架构。
+model: V548                  # 当前选择的 models 条目；V610 是 GPT 架构。
 
 extraction:
   # 与你当前 Step1 脚本的输出位置一致；切换语料时修改这里。
@@ -81,6 +81,14 @@ models:
     architecture: bert
     batch_size: 8           # 保留原 BERT 批次形状；可试验 32，需复核分类器输出。
     model_root: train/backbone/V554-BERT
+    hidden_layer: -1
+    encoder_layer: 0
+    token_offset: 128
+
+  V548:
+    architecture: bert
+    batch_size: 8           # 保留原 BERT 批次形状；可试验 32，需复核分类器输出。
+    model_root: train/backbone/V548-BERT
     hidden_layer: -1
     encoder_layer: 0
     token_offset: 128

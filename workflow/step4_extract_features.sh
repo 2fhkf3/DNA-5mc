@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# 统一 Step4：配置模型、路径、split 和隐藏层，请优先修改 step4_config.yaml。
+# 统一 Step4：BERT / Diffusion ELF / Flow Matching / GPT，优先修改 config/step4_config.yaml。
 # 正式：bash workflow/step4_extract_features.sh
 # 预览：DRY_RUN=1 MODEL=V548 bash workflow/step4_extract_features.sh
+# V013 Flow：MODEL=V013 bash workflow/step4_extract_features.sh
 # 小测试（每个 split 最多 17 条；选择新的输出目录）：
 #   MODEL=V610 SPLITS=test LIMIT=17 OUT_DIR=/tmp/step4_gpt_smoke \
 #     DATA_DIR=/path/to/windows bash workflow/step4_extract_features.sh
@@ -30,7 +31,8 @@ append_override() {
     local name="$1" flag="$2"
     if [[ -n "${overrides[$name]+set}" ]]; then cmd+=("${flag}" "${overrides[$name]}"); fi
 }
-# MODEL/VERSION：YAML 模型名；同时设置时 MODEL 优先。架构由 MODEL_ARCH 或 YAML 决定。
+# MODEL/VERSION：YAML 模型名；同时设置时 MODEL 优先。
+# MODEL_ARCH：auto / bert / diffusion / flow_matching / gpt；也可由 YAML 决定。
 append_override VERSION --model
 append_override MODEL --model
 append_override MODEL_ARCH --architecture

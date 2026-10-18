@@ -69,7 +69,7 @@ DNA-5mC/
 │   ├── step3_run_balance_chr19.sh
 │   ├── step3.1_extract_chr19_small.py     # 可选：小数据集抽取
 │   ├── step3.2_filter_chr19_mapq.py       # 可选：MAPQ / 覆盖度筛选
-│   ├── step4_extract_features.{py,sh}    # 推荐：统一 BERT / Diffusion / GPT 入口
+│   ├── step4_extract_features.{py,sh}    # 推荐：统一 BERT / Diffusion / Flow Matching / GPT 入口
 │   ├── step4_extract_window_hidden_states_*.{py,sh}  # 架构实现与原入口
 │   └── step5_center_crop_features.{py,sh}
 ├── train/
@@ -129,6 +129,7 @@ ln -s /path/to/V548 "$PROJECT_DIR/train/backbone/V548-BERT"
 | 本地模型目录 | 架构 / 用途 | 需要的主要子目录 |
 | --- | --- | --- |
 | `V011-Diffusion` | Diffusion | `encoder/`、`hf_dlm_elf_mixed_with_cls_token_step65000-unsharded/` |
+| `V013-Flow-matching` | BERT context + Flow Matching | `encoder/`、`hf_dlm_step10000/` |
 | `V543-BERT`、`V548-BERT`、`V554-BERT` | BERT | `encoder/`、`base/` |
 | `V610-GPT` | GPT / OLMo | `encoder/`、`base/` |
 | `V003-Preprocess` | 原 Step1 的默认预处理器 | `encoder/` |
@@ -169,7 +170,22 @@ MODEL=V548 LIMIT=17 OUT_DIR=/path/to/new/V548_smoke \
 MODEL=V548 bash workflow/step4_extract_features.sh
 ```
 
-设置 `MODEL=V011` 或 `MODEL=V610` 即可切换架构；`VERSION` 也是模型选择别名，同时设置时 `MODEL` 优先。只处理测试集可设 `SPLITS=test`，但训练版 Step5 和分类训练要求三个 split 齐全。
+设置 `MODEL=V011`、`MODEL=V013` 或 `MODEL=V610` 即可切换架构；`VERSION` 也是模型选择别名，同时设置时 `MODEL` 优先。只处理测试集可设 `SPLITS=test`，但训练版 Step5 和分类训练要求三个 split 齐全。
+
+V013 使用 `architecture: flow_matching`。默认 `hidden_source: ode_hidden`、`ode_steps: 2`、`ode_start_t: 0.98`、自条件 CFG 为 0.5，沿用模型 readme 的编码示例；这些参数尚未为 5mC 调优。新增的 [Flow 提取器](workflow/step4_extract_window_hidden_states_Flow-matching.py) 在项目内兼容导出包的 `hf_auto/porebert` 加载分支，严格加载全部 context/Flow 权重并调用 checkpoint 原有 ODE 实现。保留 context 的 `padding_idx=0`，批量补齐使用 tokenizer 的 pad=1，实际屏蔽由长度 mask 决定。原始模型目录不作修改。
+
+```bash
+# 推荐的统一入口；先检查数据路径和输出目录。
+MODEL=V013 DRY_RUN=1 bash workflow/step4_extract_features.sh
+MODEL=V013 DATA_DIR=/path/to/window_splits OUT_DIR=/path/to/new/V013 \
+  bash workflow/step4_extract_features.sh
+
+# 独立 Flow 入口，各参数含义已在脚本中注释。
+DATA_DIR=/path/to/window_splits OUT_DIR=/path/to/new/V013_standalone \
+  bash workflow/step4_extract_window_hidden_states_Flow-matching.sh
+```
+
+`context_hidden`、`ode_hidden` 和 `last_hidden` 是不同的特征协议；改变输出类型、ODE 参数或预处理方式时应使用新的输出目录，并重新训练对应分类头。V013 输出沿用 `[N, window_size, 768]` 的 `streaming_memmap_v1`，可继续进入 Step5。CPU 集成检查入口为 `workflow/test_step4_flow_matching.py`，使用本地 V013 权重，测试输出全部放在临时目录。
 
 直接调用 Python 时，显式传入当前配置路径：
 
@@ -554,7 +570,7 @@ Step4若已有部分 run 完成，应通过 `VERSION / RUN_NAME` 只处理缺少
 
 | 现象 | 检查方式 |
 | --- | --- |
-| 找不到 Step4 配置 | 当前 YAML 在 `workflow/config/step4_config.yaml`。Shell 已使用该路径；直接调用 Python 应显式传 `--config`，其代码默认路径仍是旧位置。 |
+| 找不到 Step4 配置 | Shell 和 Python 默认均使用 `workflow/config/step4_config.yaml`；另一个配置可通过 `EXTRACTION_CONFIG` 或 `--config` 指定。 |
 | 模型或数据路径不存在 | 核对软链接目标、YAML 绝对路径，以及 `DNA-5mC` / `DNA-5mc` 的大小写；克隆代码不会恢复外部文件。 |
 | `No module named torch/numpy` | 核对 `PYTHON_BIN` 和实际 Conda 环境，不能仅依据终端显示的环境名称。 |
 | `No space left on device` | 检查输出目录所在文件系统的空间和 inode：`df -h /path/to/output`、`df -i /path/to/output`；这是磁盘写入问题。 |

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""YAML-configured BERT / Diffusion / GPT window extraction for train/valid/test.
+"""YAML-configured BERT / Diffusion / Flow Matching / GPT window extraction.
 
 Reuses the existing architecture-specific extractors without Test1's WGA-only
 assumptions. Relative YAML paths are project-relative; CLI paths are cwd-relative.
@@ -17,13 +17,17 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT = SCRIPT_DIR.parent
 # Reuse config validation and I/O helpers, not the WGA extraction entry point.
 sys.path.insert(0, str(PROJECT / 'eval/Test1/workflow'))
-from common import (add_extraction_performance_args, infer_architecture, module,
+from common import (add_extraction_performance_args, infer_architecture as infer_legacy_architecture, module,
                     output_directory, read_json, signature, valid_model_name, write_json)
 from extraction_config import (FAMILY_DEFAULTS, FAMILY_FIELDS, MODEL_COMMON, PATHS,
                                as_path, decoder_directory, mapping, reject_unknown,
                                snapshot, validate)
 
-DEFAULT_CONFIG = SCRIPT_DIR / 'step4_config.yaml'
+DEFAULT_CONFIG = SCRIPT_DIR / 'config/step4_config.yaml'
+# Flow uses the same ODE controls, but a distinct loader and runtime. Keep this
+# dispatch local: Test1's legacy extraction entry point has its own backends.
+FAMILY_DEFAULTS = {**FAMILY_DEFAULTS, 'flow_matching': {
+    **FAMILY_DEFAULTS['diffusion'], 'ode_steps': 2, 'ode_start_t': .98}}
 GENERAL = dict(data_dir='output/step3_output/new', out_dir=None,
                output_root='output/step4_output', splits=['train', 'valid', 'test'],
                device='auto', cpu_threads=4, batch_size=8, dtype='float16',
@@ -31,14 +35,22 @@ GENERAL = dict(data_dir='output/step3_output/new', out_dir=None,
                limit=None, codec_batch_size=1, codec_buffer_size=1024, pooling_device='model')
 EXTRACTORS = dict(bert='step4_extract_window_hidden_states_BERT-js.py',
                   diffusion='step4_extract_window_hidden_states_Diffusion-kx.py',
+                  flow_matching='step4_extract_window_hidden_states_Flow-matching.py',
                   gpt='step4_extract_window_hidden_states_GPT.py')
+
+
+def infer_architecture(config):
+    dlm = config.get('dlm_config', {})
+    if str(dlm.get('model', '')).startswith('flow_matching'):
+        return 'flow_matching'
+    return infer_legacy_architecture(config)
 
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config', type=Path, default=DEFAULT_CONFIG, help='统一 Step4 YAML 配置')
     p.add_argument('--model', '--version', dest='version', help='选择 models 中的条目')
-    p.add_argument('--architecture', '--arch', choices=['auto', 'bert', 'diffusion', 'gpt'])
+    p.add_argument('--architecture', '--arch', choices=['auto', 'bert', 'diffusion', 'flow_matching', 'gpt'])
     for key in ('data_dir', 'out_dir', 'output_root', 'model_root', 'encoder_dir', 'tokenizer_file'):
         p.add_argument('--' + key.replace('_', '-'), type=Path)
     p.add_argument('--decoder-dir', '--bert-dir', '--dlm-dir', dest='decoder_dir', type=Path)
@@ -165,7 +177,7 @@ def extract(args, stage):
         decoder = impl.load_decoder(str(args.decoder_dir)).to(device).eval()
     else:
         encoder, decoder = impl.load_models(args.encoder_dir, args.decoder_dir, device)
-        if family == 'diffusion':
+        if family in ('diffusion', 'flow_matching'):
             protocol = impl.load_token_protocol(args.encoder_dir, args.decoder_dir)
     if family == 'bert':
         index, layer = impl.resolve_hidden_layer_name(args.hidden_layer, int(decoder.config.num_hidden_layers))

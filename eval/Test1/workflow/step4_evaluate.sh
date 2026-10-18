@@ -4,20 +4,20 @@ set -euo pipefail
 
 # 本次评测配置：直接运行此脚本即可评测 V610-v2；环境变量仍可临时覆盖。
 # VERSION="${VERSION:-V543}"                 # 模型版本，须与 Step2 特征一致。
-VERSION="${VERSION:-V011}"
+VERSION="${VERSION:-V548}"
 DEVICE="${DEVICE:-cuda:1}"                 # 分类器推理设备；可改为 cuda:1 或 cpu。
 CPU_THREADS="${CPU_THREADS:-4}"            # CPU 算子线程数。
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 # RUNS_ROOT：已训练模型的 experiment 目录，读取其中 runs/*/best.pt。
 # RUNS_ROOT="${RUNS_ROOT:-/home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V543-v2}"
-RUNS_ROOT="${RUNS_ROOT:-/home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V011-v2}"
+RUNS_ROOT="${RUNS_ROOT:-/home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V548-v2}"
 # CROPPED_DIR：本次直接读取 Step2 的 15 nt 特征，推理时自动中心裁剪，无需先运行 Step3。
 # CROPPED_DIR="${CROPPED_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step2_output/features/V543}"
-CROPPED_DIR="${CROPPED_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step2_output/features/V011}"
+CROPPED_DIR="${CROPPED_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step2_output/features/V548}"
 # RESULTS_DIR：当前 VERSION 的批量结果目录，每个 run 一个子目录。
 # RESULTS_DIR="${RESULTS_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/output/results/V543}"
-RESULTS_DIR="${RESULTS_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/output/results/V011}"
+RESULTS_DIR="${RESULTS_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/output/results/V548}"
 # 更换模型版本时，请同步修改 VERSION 和上面三个绝对路径，或通过环境变量覆盖。
 # SEEDS：评测 seed1–5 中已经完成的 run，不根据 WGA 结果挑选 seed。
 SEEDS="${SEEDS:-1 2 3 4 5 6}"
