@@ -1,14 +1,15 @@
 # 仅用于 Step2 隐藏状态提取；不会修改分类器训练配置。
 # 用法：bash eval/Test1/workflow/step2_extract_features.sh
 # 切换已配置模型：VERSION=V543 bash eval/Test1/workflow/step2_extract_features.sh
+# V013 Flow Matching：VERSION=V013 bash eval/Test1/workflow/step2_extract_features.sh
 # 预览最终配置：DRY_RUN=1 bash eval/Test1/workflow/step2_extract_features.sh
 # 所有 YAML 相对路径均以 DNA-5mC 项目根目录为基准；支持绝对路径和 ~。
 
-model: V548                  # 当前选择的 models 条目；V610 是 GPT 架构。
+model: V011                  # 当前选择的 models 条目；V610 是 GPT 架构。
 
 extraction:
   # 与你当前 Step1 脚本的输出位置一致；切换语料时修改这里。
-  data_dir: eval/Test1/data/step1_out/chr19
+  data_dir: eval/Test1/data/step1_out/chr16
   # null：自动使用 output_root/features/<模型名称>。比较同一模型的不同层时设不同目录。
   out_dir: null
   output_root: eval/Test1/data/step2_output
@@ -33,7 +34,7 @@ extraction:
 # architecture 决定使用哪个提取器，与 Vxxx 名称完全分开。
 # 新模型直接在 models 下新增条目，不需要在 Python 中增加版本分支。
 # 模型条目也可覆盖通用参数，例如 batch_size 或 out_dir，优先于 extraction。
-# 支持现有 PoreDLM、PoreBERT、GPT/OLMo 提取协议兼容的 checkpoint。
+# 支持现有 PoreDLM、Flow Matching、PoreBERT、GPT/OLMo 提取协议兼容的 checkpoint。
 # encoder_dir / decoder_dir 为 null 时从 model_root 解析，也可以分别指定绝对路径。
 models:
   V011:
@@ -49,6 +50,22 @@ models:
     ode_start_t: 0.97        # ODE 起始时间。
     ode_self_cond_cfg_scale: 0.5  # 自条件 CFG 系数。
     last_t: 1.0             # last_hidden 模式的时间参数，按原主干协议解释。
+
+  V013:
+    architecture: flow_matching  # 独立的 Flow runtime，不走 V011 的 ELF 提取器。
+    model_root: train/backbone/V013-Flow-matching
+    encoder_dir: null        # null 使用 model_root/encoder。
+    decoder_dir: train/backbone/V013-Flow-matching/hf_dlm_step10000  # 实际 Flow checkpoint。
+    encoder_layer: 0         # 单级 FSQ 量化轨道；V013 只支持 0。
+    hidden_source: ode_hidden  # ode_hidden / context_hidden / last_hidden / last_hidden_state。
+    ode_steps: 1             # 与当前 Flow-matching.sh 保持一致；必须匹配分类器训练特征。
+    ode_start_t: 0.97        # ODE 起始时间，取值 (0,1]。
+    ode_self_cond_cfg_scale: 0.5  # ODE 自条件 CFG 系数，>=0。
+    last_t: 1.0             # last_hidden 单次前向的时间，取值 (0,1]。
+    batch_size: 8           # 与当前独立 Flow 启动脚本一致；CUDA OOM 自动拆小。
+    # 默认输出 <output_root>/features/V013；不同隐藏状态/ODE 参数应使用独立 out_dir。
+    # 保留原 context padding_idx=0；tokenizer pad=1，实际补齐由显式长度 mask 屏蔽。
+    # context_hidden 含最终 LayerNorm，与 BERT 默认 hidden_states[-1] 的取层位置不同。
 
   V543:
     architecture: bert

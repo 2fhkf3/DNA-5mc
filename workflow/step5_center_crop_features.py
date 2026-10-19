@@ -28,6 +28,44 @@ import yaml
 ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent
 SPLITS = ("train", "valid", "test")
+PROTOCOL_KEYS = (
+    "model_architecture", "model_family", "encoder_dir", "decoder_dir", "bert_dir",
+    "encoder_layer", "hidden_source", "hidden_layer", "decoder_layers", "selected_layer_name",
+    "ode_steps", "ode_start_t", "ode_self_cond_cfg_scale", "last_t", "preprocess",
+    "input_layout", "context_hidden_selection", "token_offset", "mapping", "codebook_size",
+    "special_tokens", "max_decoder_positions", "context_pad_token_id", "inference_dtype",
+)
+
+
+def recover_source_summary(summary, plans):
+    """Preserve the protocol saved in split manifests when a merged JSON is absent.
+
+    Split jobs each publish a complete *.pt before a global summary is available.
+    Validate common protocol values rather than guessing a model from its folder.
+    """
+    result = copy.deepcopy(summary)
+    for key in PROTOCOL_KEYS:
+        values = [p["manifest"][key] for p in plans if key in p["manifest"]]
+        if not values:
+            continue
+        if len(values) != len(plans) or any(value != values[0] for value in values[1:]):
+            raise ValueError(f"三个 split 的主干协议不一致：{key}")
+        if key in result and result[key] != values[0]:
+            raise ValueError(f"feature_summary.json 与 split 清单的主干协议不一致：{key}")
+        result.setdefault(key, values[0])
+    identity = ("model_architecture", "model_family", "hidden_source", "hidden_layer", "decoder_layers")
+    if not any(result.get(key) is not None for key in identity):
+        raise ValueError("源 feature_summary.json 和 split 清单均缺少主干协议；请先合并/恢复原提取摘要")
+    if result != summary:
+        result["protocol_recovery"] = {
+            "method": "validated protocol stored in all split manifests",
+            "source_manifests": [p["signatures"][0] for p in plans],
+        }
+    if not result.get("splits"):
+        result["splits"] = [dict(split=p["split"], records=p["shape"][0], feature_shape=list(p["shape"]),
+                                  feature_path=str(p["feature_path"]), label_path=str(p["label_path"]),
+                                  metadata_path=str(p["metadata_path"])) for p in plans]
+    return result
 
 
 def signature(path):
@@ -196,6 +234,7 @@ def run(args):
                        + p["metadata_path"].stat().st_size*2 for p in plans)
     source_summary_path = input_dir / "feature_summary.json"
     source_summary = (json.loads(source_summary_path.read_text()) if source_summary_path.exists() else {})
+    source_summary = recover_source_summary(source_summary, plans)
     source_extra_signatures = [signature(template_path)]
     if source_summary_path.exists():
         source_extra_signatures.append(signature(source_summary_path))

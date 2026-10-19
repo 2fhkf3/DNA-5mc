@@ -13,12 +13,18 @@ from pathlib import Path
 from common import add_extraction_performance_args, PROJECT, module, output_directory, read_json, readonly_db, signature, write_json
 from extraction_config import DEFAULT_CONFIG, resolve, snapshot
 
+EXTRACTORS = {
+    'diffusion': 'step4_extract_window_hidden_states_Diffusion-kx.py',
+    'flow_matching': 'step4_extract_window_hidden_states_Flow-matching.py',
+    'gpt': 'step4_extract_window_hidden_states_GPT.py',
+}
+
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config', type=Path, default=DEFAULT_CONFIG, help='Step2 YAML 配置；相对路径以项目根目录为基准')
     p.add_argument('--version', '--model', help='选择 YAML models 条目，不限制 Vxxx 编号')
-    p.add_argument('--architecture', '--arch', choices=['auto', 'diffusion', 'bert', 'gpt'], help='主干架构，与版本编号分开')
+    p.add_argument('--architecture', '--arch', choices=['auto', 'diffusion', 'flow_matching', 'bert', 'gpt'], help='主干架构，与版本编号分开')
     p.add_argument('--data-dir', type=Path, help='Step1 生成的 test.jsonl.gz 和数据清单目录')
     p.add_argument('--out-dir', type=Path, help='新建特征目录，禁止覆盖')
     p.add_argument('--output-root', type=Path, help='默认输出根目录，最终路径为 features/<version>')
@@ -37,7 +43,7 @@ def parser():
     p.add_argument('--encoder-layer', type=int, help='encoder 量化轨道参数')
     p.add_argument('--hidden-layer', type=int, help='BERT hidden_states 索引；-1 为最后层')
     p.add_argument('--token-offset', type=int, help='BERT/GPT codec 词表偏移')
-    p.add_argument('--hidden-source', help='Diffusion 的 ode_hidden/context_hidden/last_hidden 等')
+    p.add_argument('--hidden-source', help='Diffusion / Flow Matching 的 ode_hidden/context_hidden/last_hidden 等')
     p.add_argument('--ode-steps', type=int)
     p.add_argument('--ode-start-t', type=float)
     p.add_argument('--ode-self-cond-cfg-scale', type=float)
@@ -57,9 +63,8 @@ def parser():
 
 
 def extractor_command(args, data, stage):
-    """Build the original GPT/Diffusion CLI from the resolved architecture profile."""
-    script = ('step4_extract_window_hidden_states_Diffusion-kx.py' if args.architecture == 'diffusion'
-              else 'step4_extract_window_hidden_states_GPT.py')
+    """Call the matching architecture's existing extractor, limited to test."""
+    script = EXTRACTORS[args.architecture]
     command = [sys.executable, '-u', str(PROJECT/'workflow'/script), '--data-dir', str(data),
                '--encoder-dir', str(args.encoder_dir), '--decoder-dir', str(args.decoder_dir), '--out-dir', str(stage),
                '--splits', 'test', '--device', args.device, '--cpu-threads', str(args.cpu_threads),

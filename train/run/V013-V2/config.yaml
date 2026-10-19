@@ -1,0 +1,91 @@
+# Run from DNA-5mC/train/: bash run/V011-v2/run.sh
+# All relative paths below are resolved against DNA-5mC/train/.
+# Feature paths are relative to train/; choose the model-specific Step4/Step5 output.
+feature_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V013-V2
+# Read metadata_train.tsv, metadata_valid.tsv and metadata_test.tsv from this
+# directory. null follows feature_dir automatically; a separate path is optional.
+metadata_dir: null
+output_dir: output
+experiment: V013-v2
+
+
+
+wandb:
+  enabled: true
+  project: "DNA-5mc-classifier"
+  entity: "shenhaojie223-hangzhpu"
+  name: null              # 使用 experiment/分类头_seedN
+  group: null             # 使用 experiment 分组
+  mode: online            # 可用 WANDB_MODE=offline 切换离线
+  tags: [V013]
+# Use one or more of the seven strategies. To run just one, replace this list
+# with, for example: strategy: center_5mer_emb8_none
+strategies:
+  - center_base_linear_raw768
+  - center_5mer_linear_raw768
+  # - center_5mer_gaussian_pool_linear_raw768
+  # - center_5mer_learned_pool_linear_raw768
+  - center_5mer_mlp_raw768
+  - center_5mer_residual_dwconv_raw768
+  - center_5mer_emb8_none
+seeds: [1,2,3]       # Alternatively: seed: 1
+device: auto          # auto, cpu, cuda:0, cuda:1
+devices: ["cuda:0", "cuda:1"]
+# Fusion keeps the signal branch; the base branch is only nn.Embedding(...,8).
+# It uses no mean/std/signal-count statistics or extra statistics TSV.
+base_source: ref        # TSV ref column; use seq to select the TSV seq column
+fusion_window_size: 5   # Center-crop to 5 positions, matching the original launcher
+check_site_overlap: true  # Check chromosome + coordinate across all three splits
+skip_completed: true     # Skip only when config, input signatures and code match
+evaluate_train: false    # Final evaluation always includes valid and test
+save_predictions: test   # none, test, all (train is evaluated only if enabled)
+
+training:
+  # 可选 GPU 特征缓存：默认关闭；按 GPU 工作进程复用，保留源特征精度。
+  gpu_cache: true
+  gpu_cache_splits: [train, valid]  # 未缓存的 split 继续使用原有读取方式
+  gpu_cache_max_gib: 40.0          # 每个工作进程的缓存总上限（GiB）
+  gpu_cache_reserve_gib: 4.0       # 加载后为训练等额外开销预留的显存（GiB）
+  gpu_cache_chunk_size: 8192       # 每块加载的样本数，避免整份数据占用 CPU 内存
+  gpu_cache_fallback: true         # 显存不足/非 CUDA 时回退；false 则直接报错
+
+  epochs: 200
+  patience: 12
+  batch_size: 2048
+  eval_batch_size: 2048
+  lr: 0.0001
+  weight_decay: 0.0001
+  grad_clip: 0.0
+  monitor_metric: auroc   # auroc, auprc, f1, accuracy, loss; uses valid only
+  threshold: 0.5
+  num_workers: 4
+  cpu_threads: 4
+  deterministic: true
+  log_every_steps: 100   # Also log the first/last batch; 0 disables step logs
+  batch_read: true
+  eval_num_workers: 0
+  prefetch_factor: 2
+  persistent_workers: true
+
+
+model:
+  gaussian_sigma: 1.0
+  mlp_hidden_dims: [512, 128]
+  conv_channels: 128
+  conv_head_dim: 128
+  dropout: 0.2
+  deepplant:
+    signal_mlp_hidden: 256
+    signal_mlp_dropout: 0.1
+    base_hidden: 128
+    fusion_hidden: 256
+    base_layers: 2
+    fusion_layers: 3
+    dropout: 0.5
+
+# Optional training overrides keyed by strategy; model structures are above.
+strategy_overrides:
+  center_5mer_emb8_none:
+    batch_size: 512
+    eval_batch_size: 512
+    grad_clip: 0.5

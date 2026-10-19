@@ -1,6 +1,6 @@
 # Test1 可执行工作流
 
-使用已经预处理的 WGA UNMOD 全 read JSONL，构建正链 CpG 阴性窗口，再用已有 V011 / V543 / V610 主干和分类头进行只读推理。不会调用训练启动器或更新模型。
+使用已经预处理的 WGA UNMOD 全 read JSONL，构建正链 CpG 阴性窗口，再用 BERT、Diffusion、Flow Matching、GPT 主干和对应分类头进行只读推理。不会调用训练启动器或更新模型。
 
 默认输入：
 
@@ -16,7 +16,7 @@
 | --- | --- | --- | --- |
 | 1 | [step1_build_unmod_windows.py](step1_build_unmod_windows.py) | [step1_build_unmod_windows.sh](step1_build_unmod_windows.sh) | 提取 15 nt 正链窗口、按原始 read 去重、计算覆盖度和保存审计索引 |
 | 1.1（天然阴性分支） | [step1.1_build_native_negatives.py](step1.1_build_native_negatives.py) | [step1.1_build_native_negatives.sh](step1.1_build_native_negatives.sh) | 从已有 test 缓存同步筛选 label=0 特征、标签、元数据；直接供 Step4 使用 |
-| 2 | [step2_extract_features.py](step2_extract_features.py) | [step2_extract_features.sh](step2_extract_features.sh) | 复用原三种主干的提取实现，仅处理 test |
+| 2 | [step2_extract_features.py](step2_extract_features.py) | [step2_extract_features.sh](step2_extract_features.sh) | 复用各架构的提取实现，仅处理 test |
 | 3 | [step3_center_crop.py](step3_center_crop.py) | [step3_center_crop.sh](step3_center_crop.sh) | 将 test 表征从 15 个位置裁剪到中心 5 个，保留原上下文 |
 | 4 | [step4_evaluate.py](step4_evaluate.py) | [step4_evaluate.sh](step4_evaluate.sh) | 加载完成训练的 best.pt，输出 read/site FPR、覆盖度分层和置信区间 |
 | 5 | [step5_compare.py](step5_compare.py) | [step5_compare.sh](step5_compare.sh) | 汇总各 seed，并匹配相同 read–位点比较不同主干 |
@@ -31,7 +31,7 @@
 这是与 WGA 评测并行的补充实验。默认输入为：
 
 ```text
-/home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V011-V2
+/home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V013-V2
 ```
 
 该目录的 test 已经是中心裁剪后的 `[N, 5, 768]` 隐藏状态缓存，不含原始信号。本步骤只在原 test 中选择 `label=0`，同步复制对应特征、原标签和元数据，保持顺序、数值、精度、坐标、原始 read ID 和裁剪上下文，不重新运行主干，不把阳性改成阴性，也不读取 train/valid。
@@ -50,7 +50,9 @@ MAX_RECORDS=128 OUT_DIR=/tmp/native_bed0_smoke \
   bash eval/Test1/workflow/step1.1_build_native_negatives.sh
 ```
 
-默认输出目录为 `/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step3_output`，允许预先创建的空目录，拒绝覆盖非空目录。全量 V011 输入包含 1,295,166 个阴性窗口，FP16 特征与标签本身约 9.95 GB，另需元数据和审计索引空间。脚本分块复制、检查标签和 TSV 对齐、拒绝重复 read–位点，并在完成后发布输出；失败时清理临时数据。
+当前 Shell 默认版本为 `V013`，输出目录为 `/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step3_output/chr16-native/V013-V2`，允许预先创建的空目录，拒绝覆盖非空目录。实际阴性窗口数和空间估计以 `DRY_RUN=1` 为准；约 129.5 万个 `[5,768]` FP16 窗口的特征与标签约需 9.95 GB，另需元数据和审计索引空间。脚本分块复制、检查标签和 TSV 对齐、拒绝重复 read–位点，并在完成后发布输出；失败时清理临时数据。
+
+`Cannot infer source backbone architecture` 表示输入 `feature_summary.json` 缺少可识别的主干协议。例如双卡输出只有 `feature_summary-train.json` 和 `feature_summary-val-test.json`，未合并为规范摘要时，旧 Step5 可能把 `source_feature_summary` 写成空字典。Step5 现会核对三个 `.pt` 清单中保存的协议并补全摘要；如果三个 split 的协议不同则拒绝继续。已有缓存应从真实清单恢复协议信息，无需重提取或复制特征；不能只根据目录名称猜测架构。
 
 ```text
 step3_output/
@@ -65,17 +67,19 @@ step3_output/
 
 `INPUT_DIR`、`OUT_DIR`、`VERSION`、`LIBRARY_ID`、`CHUNK_SIZE` 等可通过环境变量覆盖，含义见 Shell 注释。默认天然文库 ID 为 `NATIVE_250F500490011`；使用其他文库时应修改，同文库切换主干时保持一致。原始元数据缺失的 MAPQ 保持为空，不虚构质量值，也不额外应用覆盖度/MAPQ 筛选。
 
+切换来源缓存时必须同步设置 `VERSION`。例如输入目录为 `V610-V2`，版本也必须为 `V610`；生成器现在会拒绝已命名的 `Vxxx-V2` 来源目录与 `--version` 不一致的组合，避免把默认版本误写入新缓存。已有天然阴性 V543、V548、V554、V610 缓存的历史 `V011` 标记已逐份根据 NAS 上相同的原始清单和 16 个阴性窗口特征核对后修正，记录保存在清单的 `version_metadata_correction` 中；历史 `selection_manifest.json` 中的原调用参数保留。
+
 本步骤输出已经是特征缓存，**直接进入 Step4**，不经过 WGA Step2，也无需再次裁剪：
 
 ```bash
-VERSION=V011 \
-RUNS_ROOT=/home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V011-v2 \
-CROPPED_DIR=/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step3_output \
-RESULTS_DIR=/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/output/native_bed0/V011 \
+VERSION=V013 \
+RUNS_ROOT=/home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V013-v2 \
+CROPPED_DIR=/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step3_output/chr16-native/V013-V2 \
+RESULTS_DIR=/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/output/native_bed0/V013 \
   bash eval/Test1/workflow/step4_evaluate.sh
 ```
 
-Step4 在指标中保留 `dataset_kind` 和 `truth_source`，天然阴性结果存放在 WGA `results/` 之外，避免误当作 WGA 汇总。只能使用在相同 V011 表征协议上训练的分类头；比较 BERT/GPT 时应从各自缓存重新运行本步骤，不能共用 V011 隐藏状态。
+Step4 在指标中保留 `dataset_kind` 和 `truth_source`，天然阴性结果存放在 WGA `results/` 之外，避免误当作 WGA 汇总。只能使用在相同主干及特征协议上训练的分类头；切换模型时应同步 `VERSION`、输入和输出路径，从各自缓存重新运行本步骤。
 
 ## Step2：统一配置不同版本和隐藏层
 
@@ -85,7 +89,7 @@ Step4 在指标中保留 `dataset_kind` 和 `truth_source`，天然阴性结果�
 - `extraction`：语料路径、输出位置、设备、批次、缓存精度、窗口长度等通用参数。
 - `models.<名称>`：架构、权重路径和该架构的隐藏状态选项。
 
-当前配置为 V011 → Diffusion、V543 → BERT、V610 → GPT。模型名称不再决定提取器；由 `architecture` 选择 `diffusion`、`bert` 或 `gpt`，也可设为 `auto` 根据主干 `config.json` 判断。支持与现有 PoreDLM、PoreBERT、GPT/OLMo 提取协议兼容的更新权重；结构或信号/token 协议发生变化时仍需要对应适配。
+当前配置支持 V011 → Diffusion、V013 → Flow Matching、V543/V548/V554 → BERT、V610 → GPT。模型名称不决定提取器；由 `architecture` 选择 `diffusion`、`flow_matching`、`bert` 或 `gpt`，也可设为 `auto` 根据主干 `config.json` 判断。支持与现有提取协议兼容的更新权重；结构或信号/token 协议发生变化时仍需要对应适配。
 
 默认 `extraction.data_dir` 已与当前 Step1 脚本一致，指向 `eval/Test1/data/step1_out/chr19`。所有 YAML 内部相对路径以项目根目录为基准；CLI 传入的相对路径以调用目录为基准。
 
@@ -114,8 +118,29 @@ models:
 | GPT | `decoder_layers` | `last` 为最终隐藏状态；整数 8 表示 Transformer 第 8 层，从 0 开始编号 |
 | GPT | `selected_layer_name` | 多选如 `[3, 8]` 时，指定实际落盘的一层，如 `layer_8` |
 | Diffusion | `hidden_source` 和 ODE 参数 | 选择 `ode_hidden`、`context_hidden`、`last_hidden` 等原提取器支持的表征来源 |
+| Flow Matching | `hidden_source` 和 ODE 参数 | 复用 V013 Flow 提取器，调用该 checkpoint 原有 Flow/ODE 实现 |
 
 每次输出保存一个目标层/表征来源。比较同一模型的多个隐藏层时，使用不同 `out_dir` 或 `FEATURES_DIR`。改变主干、层或 ODE 协议后，需要使用在对应特征上训练的分类头；评测器会核对训练协议。
+
+V013 的配置位于 `models.V013`，权重目录为 `train/backbone/V013-Flow-matching/hf_dlm_step10000`。Step2 复用项目已有的 [Flow Matching 提取器](../../../workflow/step4_extract_window_hidden_states_Flow-matching.py)，保留 WGA 审计字段补全、数据签名、限量测试标记和原子发布流程。输出仍为 `[N,15,768]` 的 `streaming_memmap_v1`，可直接交给 Step3，或由 Step4 按分类头需要自动中心裁剪。
+
+当前 V013 条目采用 `ode_hidden`、`ode_steps=1`、`ode_start_t=0.97`、CFG=0.5、`batch_size=8`，与当前独立 `Flow-matching.sh` 一致。Test1 使用自身 YAML/CLI 参数，不读取独立 `.sh` 的变量；后续修改其中一处时，应核对实际训练特征的 `feature_summary.json`，再同步相应评测配置。Step4 已单独识别并检查 `flow_matching` 的协议。
+
+```bash
+# 先预览，核对 V013 权重、隐藏状态参数和输出路径。
+VERSION=V013 DRY_RUN=1 bash eval/Test1/workflow/step2_extract_features.sh
+
+# 正式提取已有 Step1 的 WGA 窗口，默认输出 eval/Test1/data/step2_output/features/V013。
+VERSION=V013 bash eval/Test1/workflow/step2_extract_features.sh
+
+# CPU 小测试：只读前 17 条，指定一个新的临时特征目录。
+VERSION=V013 DEVICE=cpu LIMIT=17 FEATURES_DIR=/tmp/test1_v013_features \
+  bash eval/Test1/workflow/step2_extract_features.sh
+```
+
+V013 的 `context_hidden` 包含最终 LayerNorm；BERT 提取器默认的 `hidden_states[-1]` 在最终 LayerNorm 前，两者不是同一特征协议。若选择 `context_hidden` 或修改 ODE 参数，应使用新的输出目录和匹配的分类头。context BERT 的 `padding_idx=0` 与 tokenizer pad=1 按既有 Flow 适配器处理，批量推理始终显式传入长度 mask。
+
+2026-10-19 的 CPU 小样本联调使用了 17 个真实 WGA 窗口：通过 Bash → Step2 → Step3，得到 `[17,15,768]` 和 `[17,5,768]` 特征；Step2 特征和标签与独立 Flow 脚本的同参数输出逐字节一致。另检查了 WGA 审计字段补全、限量测试标记、最终文件路径、各模型架构解析，以及 Step4 对 Flow 协议的接受/不一致拒绝。测试仅写入 `/tmp`，未运行全量提取或 GPU 测试。
 
 ```bash
 # 不加载权重、不创建特征，只展示最终解析配置并核对模型 config 路径。
@@ -139,7 +164,7 @@ EXTRACTION_CONFIG=/path/to/experiment.yaml \
 ## Step2 推理优化配置
 
 性能选项直接放在现有 `config.yaml` 的 `extraction` 下，也可在 `models.<名称>` 中覆盖。
-没有增加新的提取脚本，三类原提取器复用现有 `common.py` 中的性能辅助函数。
+性能选项沿用已有提取器及 `common.py` 中的辅助函数，Flow Matching 也支持这些配置。
 
 ```yaml
 extraction:
@@ -151,7 +176,7 @@ extraction:
 
 | 参数 | 作用和选择 |
 | --- | --- |
-| `batch_size` | 主干推理批次。Diffusion/GPT 当前设为 32；V543/V554 在各自模型条目覆盖为 8，保留原 BERT 批次形状。显存不足会自动拆小。 |
+| `batch_size` | 主干推理批次。Diffusion/GPT 当前设为 32；BERT 和 V013 Flow Matching 在各自模型条目覆盖为 8。显存不足会自动拆小。 |
 | `codec_batch_size` | 默认 1，沿用原逐条 codec 编码。大于 1 时按**完全相同的信号长度**分组批量编码，不补零，随后恢复输入顺序。批量编码会改变卷积数值运算，可能改变离散 token；需作为单独实验验证后使用。 |
 | `codec_buffer_size` | 只有批量 codec 启用时使用，限制暂存的有效窗口数量；末尾不足一批也会处理。当前为 1024，不缓存整套语料。 |
 | `pooling_device` | `model` 在模型设备上按原 span 区间进行 FP32 均值聚合，再一次性传回 `[B,15,H]`；`cpu` 保留原先完整 token 隐藏状态传回 CPU 后逐窗口聚合的路径。模型在 CPU 时，两种模式都可运行。 |
@@ -244,6 +269,24 @@ STRATEGIES="center_base_linear_raw768" \
 
 `DRY_RUN=1` 不创建输出，不检查完整数据和权重是否能执行。Step2 会额外解析 YAML、检查模型 config 路径并显示最终设置；其他步骤仍只显示命令。
 
+### Step4 显式指定迁移后的训练特征目录
+
+训练特征迁移后，checkpoint 内的 `feature_dir` 仍保留原地址。Step4 支持通过 `TRAINING_FEATURE_DIR`（Python 参数 `--training-feature-dir`）指定当前目录，读取其中的 `feature_summary.json`，继续严格核对主干、隐藏层及预处理协议；不会修改 checkpoint 或重新读取训练特征数组。
+
+当前 Bash 默认地址为 `/mnt/nas_data/shenhaojie/step5-output/${VERSION}-V2`。例如 V543 使用：
+
+```bash
+TRAINING_FEATURE_DIR=/mnt/nas_data/shenhaojie/step5-output/V543-V2 \
+DEVICE=cuda:1 bash eval/Test1/workflow/step4_evaluate.sh
+
+# 只查看完整命令，确认 --training-feature-dir 已指向 NAS。
+DRY_RUN=1 bash eval/Test1/workflow/step4_evaluate.sh
+```
+
+运行时会显示 `[PROTOCOL] training feature summary: ...`，结果 `run_manifest.json` 的 `protocol_verification` 保存实际清单路径和 checkpoint 原始路径。显式地址不存在时直接报错，不会静默换用其他清单或跳过核对。
+
+直接运行 Python 且不传新参数时，保持沿用 checkpoint 中的原地址。V013 当前仍在项目 `train/data/V013-V2` 时，应显式指定该目录。切换版本时仍需同步配置相应的模型与评测输入/输出路径。
+
 ## 常用参数
 
 | 环境变量 | 默认值 | 含义 |
@@ -258,8 +301,9 @@ STRATEGIES="center_base_linear_raw768" \
 | `MAX_RECORDS` / `MAX_WINDOWS` | 空 | 仅用于受限测试；有限输入结果带 `partial_test` 标记 |
 | `EXTRACTION_CONFIG` | `workflow/config.yaml` | Step2 配置文件 |
 | `VERSION` | Step2 采用 YAML 的 `model` | 模型名称，允许新增版本 |
-| `MODEL_ARCH` | 采用 YAML 模型条目 | Step2 架构：diffusion / bert / gpt / auto |
+| `MODEL_ARCH` | 采用 YAML 模型条目 | Step2 架构：diffusion / flow_matching / bert / gpt / auto |
 | `DEVICE` / `CPU_THREADS` | `auto` / `4` | 设备和 CPU 算子线程 |
+| `TRAINING_FEATURE_DIR` | `/mnt/nas_data/shenhaojie/step5-output/${VERSION}-V2` | Step4 训练特征清单的当前目录；覆盖 checkpoint 中记录的旧位置，保留协议核对 |
 | `BATCH_SIZE` | YAML：Diffusion/GPT 32，BERT 8 | 主干提取批次 |
 | `CODEC_BATCH_SIZE` | YAML：1 | 等长信号编码批次；大于 1 可能改变离散 token |
 | `CODEC_BUFFER_SIZE` | YAML：1024 | codec 分组缓冲窗口数 |

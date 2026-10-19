@@ -16,6 +16,8 @@ GENERAL = dict(data_dir='eval/Test1/data/step1_out/chr19', out_dir=None,
 FAMILY_DEFAULTS = {
     'diffusion': dict(encoder_layer=0, hidden_source='ode_hidden', ode_steps=1, ode_start_t=.97,
                       ode_self_cond_cfg_scale=.5, last_t=1.),
+    'flow_matching': dict(encoder_layer=0, hidden_source='ode_hidden', ode_steps=1, ode_start_t=.97,
+                          ode_self_cond_cfg_scale=.5, last_t=1.),
     'bert': dict(encoder_layer=0, hidden_layer=-1, token_offset=128),
     'gpt': dict(encoder_layer=1, decoder_layers='last', selected_layer_name=None, token_id_mode='auto',
                 tokenizer_file=None, token_offset=128, special_tokens='none', codec_mode='auto',
@@ -90,7 +92,7 @@ def resolve(args):
     architecture = settings.get('architecture', 'auto')
     if architecture == 'auto':
         if not detected:
-            raise ValueError('Cannot infer architecture; explicitly configure diffusion, bert or gpt')
+            raise ValueError('Cannot infer architecture; configure diffusion, flow_matching, bert or gpt')
         architecture = detected
     if architecture not in FAMILY_DEFAULTS:
         raise ValueError(f'Unsupported architecture: {architecture!r}')

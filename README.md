@@ -200,6 +200,8 @@ DATA_DIR=/path/to/window_splits OUT_DIR=/path/to/new/V013_standalone \
 
 下面使用已有的完整 Step4 特征，生成中心 5-mer 缓存及对应训练配置。裁剪保留 Step4 的上下文信息，只截取隐藏状态的位置，不重新运行主干模型。
 
+双卡按 split 提取后，应合并各任务的摘要为 `feature_summary.json`。若该摘要缺失，Step5 会核对三个 `.pt` 中记录的主干协议并恢复到裁剪摘要，保留模型路径、隐藏状态、ODE 和 token 参数；协议不一致或缺少可恢复信息时会报错。
+
 ```bash
 # 指向完整 Step4 输出，包含三个 split。
 export FEATURE_DIR=/path/to/features/V548

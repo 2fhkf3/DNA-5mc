@@ -2,22 +2,26 @@
 # 只加载已训练的 best.pt，不建立优化器，不继续训练，不上传 W&B。
 set -euo pipefail
 
-# 本次评测配置：直接运行此脚本即可评测 V610-v2；环境变量仍可临时覆盖。
+# 本次评测配置：直接运行此脚本即可评测 V543-v2；环境变量仍可临时覆盖。
 # VERSION="${VERSION:-V543}"                 # 模型版本，须与 Step2 特征一致。
-VERSION="${VERSION:-V548}"
+VERSION="${VERSION:-V554}"
 DEVICE="${DEVICE:-cuda:1}"                 # 分类器推理设备；可改为 cuda:1 或 cpu。
 CPU_THREADS="${CPU_THREADS:-4}"            # CPU 算子线程数。
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 # RUNS_ROOT：已训练模型的 experiment 目录，读取其中 runs/*/best.pt。
 # RUNS_ROOT="${RUNS_ROOT:-/home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V543-v2}"
-RUNS_ROOT="${RUNS_ROOT:-/home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V548-v2}"
+RUNS_ROOT="${RUNS_ROOT:-/home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V554-v2}"
+# TRAINING_FEATURE_DIR：训练特征迁移后的实际目录，需包含 feature_summary.json。
+# 仅读取清单核对协议，不重新读取训练特征数组；默认按 VERSION 定位 NAS 上的目录。
+# V013 尚未迁移到该 NAS 根目录时，可显式设置为项目 train/data/V013-V2。
+TRAINING_FEATURE_DIR="${TRAINING_FEATURE_DIR:-/mnt/nas_data/shenhaojie/step5-output/${VERSION}-V2}"
 # CROPPED_DIR：本次直接读取 Step2 的 15 nt 特征，推理时自动中心裁剪，无需先运行 Step3。
 # CROPPED_DIR="${CROPPED_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step2_output/features/V543}"
-CROPPED_DIR="${CROPPED_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step2_output/features/V548}"
+CROPPED_DIR="${CROPPED_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step3_output/chr16-native/V554-V2}"
 # RESULTS_DIR：当前 VERSION 的批量结果目录，每个 run 一个子目录。
 # RESULTS_DIR="${RESULTS_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/output/results/V543}"
-RESULTS_DIR="${RESULTS_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/output/results/V548}"
+RESULTS_DIR="${RESULTS_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/output/results/chr16-native/V554}"
 # 更换模型版本时，请同步修改 VERSION 和上面三个绝对路径，或通过环境变量覆盖。
 # SEEDS：评测 seed1–5 中已经完成的 run，不根据 WGA 结果挑选 seed。
 SEEDS="${SEEDS:-1 2 3 4 5 6}"
@@ -39,6 +43,7 @@ SAVE_READ_PREDICTIONS="${SAVE_READ_PREDICTIONS:-1}"
 cmd=("${PYTHON_BIN}" "${TEST1_WORKFLOW_DIR}/step4_evaluate.py"
      --version "${VERSION}"
      --feature-dir "${CROPPED_DIR}"
+     --training-feature-dir "${TRAINING_FEATURE_DIR}"
      --out-dir "${RESULTS_DIR}"
      --device "${DEVICE}"
      --cpu-threads "${CPU_THREADS}"

@@ -2,6 +2,7 @@
 # Step2 统一提取入口：版本、架构、路径、隐藏层参数主要在同目录 config.yaml 中修改。
 # 默认：bash step2_extract_features.sh
 # 切换：VERSION=V543 bash step2_extract_features.sh
+# V013 Flow Matching：VERSION=V013 bash step2_extract_features.sh
 # 仅解析最终配置：DRY_RUN=1 bash step2_extract_features.sh
 # 指定配置：EXTRACTION_CONFIG=/path/to/config.yaml bash step2_extract_features.sh
 set -euo pipefail
@@ -28,7 +29,7 @@ append_override() {
     if [[ -n "${step2_overrides[$name]+set}" ]]; then cmd+=("${flag}" "${step2_overrides[$name]}"); fi
 }
 
-# VERSION：选择 models 中的条目；MODEL_ARCH：diffusion / bert / gpt / auto。
+# VERSION：选择 models 中的条目；MODEL_ARCH：diffusion / flow_matching / bert / gpt / auto。
 append_override VERSION --version
 append_override MODEL_ARCH --architecture
 # MODEL_ROOT：模型根目录；ENCODER_DIR / DECODER_DIR 可分别指定不同 checkpoint。
@@ -59,7 +60,7 @@ append_override LIMIT --limit
 append_override ENCODER_LAYER --encoder-layer
 append_override HIDDEN_LAYER --hidden-layer
 append_override TOKEN_OFFSET --token-offset
-# Diffusion：表征来源、ODE 步数、时间和自条件系数，含义详见 config.yaml。
+# Diffusion / Flow Matching：表征来源、ODE 步数、时间和自条件系数，含义详见 config.yaml。
 append_override HIDDEN_SOURCE --hidden-source
 append_override ODE_STEPS --ode-steps
 append_override ODE_START_T --ode-start-t

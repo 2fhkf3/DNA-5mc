@@ -9,15 +9,15 @@
 set -euo pipefail
 
 # VERSION：用于记录特征所属模型；不是把其他主干的特征转换为这个版本。
-VERSION="${VERSION:-V011}"
+VERSION="${VERSION:-V013}"
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 # INPUT_DIR：只读取该目录的 test.pt / test bin / metadata_test.tsv / feature_summary.json。
 # 不读取 train/valid，不修改原始文件，不依据模型预测筛选阴性。
-INPUT_DIR="${INPUT_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V011-V2}"
+INPUT_DIR="${INPUT_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V013-V2}"
 # OUT_DIR：直接保存全阴性特征缓存；允许空目录，非空时拒绝覆盖。
 # 输入已经裁剪到 5 个位置，本步骤保持原 W/H/精度，不生成原始 signal JSONL。
-OUT_DIR="${OUT_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step3_output/chr16-native/V011-V2}"
+OUT_DIR="${OUT_DIR:-/home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test1/data/step3_output/chr16-native/V013-V2}"
 # LIBRARY_ID：天然实验文库 ID；同文库切换主干时保持一致，不能冒用 WGA 的 ID。
 LIBRARY_ID="${LIBRARY_ID:-NATIVE_250F500490011}"
 # CHUNK_SIZE：每块扫描多少个原始 test 窗口；4096 时特征缓冲为几十 MB。

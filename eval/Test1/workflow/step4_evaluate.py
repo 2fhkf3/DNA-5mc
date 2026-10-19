@@ -19,6 +19,8 @@ def parser():
     group.add_argument('--run-dir', type=Path, help='单个已完成训练的 run，读取其中 best.pt')
     group.add_argument('--runs-root', type=Path, help='批量扫描 experiment 根目录或其 runs 子目录')
     p.add_argument('--feature-dir', type=Path, required=True, help='Test1 的 test.pt / bin / metadata 目录')
+    p.add_argument('--training-feature-dir', type=Path,
+                   help='训练特征清单所在目录，需含 feature_summary.json；迁移后显式指定，默认沿用 checkpoint 的 feature_dir')
     p.add_argument('--out-dir', type=Path, required=True, help='单 run 结果目录，或批量结果的父目录')
     p.add_argument('--version', type=valid_model_name, required=True, help='用于核对特征来源和 checkpoint 版本，支持新版本名')
     p.add_argument('--strategies', nargs='+', help='批量时限制分类头；默认所有已完成的分类头')
@@ -37,19 +39,32 @@ def parser():
     return p
 
 
-def check_protocol(summary, config, version):
+def check_protocol(summary, config, version, training_feature_dir=None):
     if summary.get('eval_version') != version:
-        raise ValueError('Feature version does not match --version')
+        raise ValueError(
+            f'Feature version {summary.get("eval_version")!r} does not match --version {version!r}; '
+            f'feature source: {summary.get("source_dataset", summary.get("out_dir", "unknown"))}. '
+            'Check the selected feature directory and its generation-time version metadata.')
     if not config.get('experiment', '').upper().startswith(version.upper()):
         raise ValueError('Checkpoint experiment does not match feature version')
-    old_file = Path(config['feature_dir'])/'feature_summary.json'
+    training_root = Path(training_feature_dir if training_feature_dir is not None
+                         else config['feature_dir']).expanduser().resolve()
+    old_file = training_root/'feature_summary.json'
     if not old_file.is_file():
-        raise FileNotFoundError(f'Cannot verify training feature protocol: {old_file}')
+        raise FileNotFoundError(
+            f'Cannot verify training feature protocol: {old_file}. '
+            'If the training cache was moved, set --training-feature-dir '
+            '(TRAINING_FEATURE_DIR in step4_evaluate.sh) to its current directory.')
+    print(f'[PROTOCOL] training feature summary: {old_file}', flush=True)
     old = read_json(old_file)
     architecture = infer_architecture(summary)
     if architecture is None or architecture != infer_architecture(old):
         raise ValueError('Feature architecture does not match the training feature protocol')
     keys = {'diffusion': ['encoder_layer', 'hidden_source', 'ode_steps', 'ode_start_t', 'ode_self_cond_cfg_scale', 'last_t'],
+            'flow_matching': ['encoder_layer', 'hidden_source', 'ode_steps', 'ode_start_t',
+                              'ode_self_cond_cfg_scale', 'last_t', 'input_layout',
+                              'context_hidden_selection', 'context_pad_token_id', 'special_tokens',
+                              'max_decoder_positions'],
             'bert': ['encoder_layer', 'hidden_layer', 'token_offset'],
             'gpt': ['encoder_layer', 'decoder_layers', 'input_layout', 'resolved_token_id_mode', 'selected_layer_name']}[architecture]
     for key in ['preprocess', *keys]:
@@ -58,7 +73,10 @@ def check_protocol(summary, config, version):
     for key in ['encoder_dir', 'decoder_dir']:
         if key in old and Path(summary[key]).resolve() != Path(old[key]).resolve():
             raise ValueError(f'Backbone path mismatch for {key}')
-    return dict(training_summary=signature(old_file), compared_fields=['preprocess', *keys, 'encoder_dir', 'decoder_dir'])
+    return dict(training_summary=signature(old_file),
+                checkpoint_feature_dir=config['feature_dir'],
+                training_feature_dir_overridden=training_feature_dir is not None,
+                compared_fields=['preprocess', *keys, 'encoder_dir', 'decoder_dir'])
 
 
 def evaluate(args, run_dir, output):
@@ -73,7 +91,8 @@ def evaluate(args, run_dir, output):
     config = checkpoint['config']
     root = args.feature_dir.resolve()
     summary = read_json(root/'feature_summary.json')
-    protocol = check_protocol(summary, config, args.version)
+    protocol = check_protocol(summary, config, args.version,
+                              training_feature_dir=getattr(args, 'training_feature_dir', None))
     meta = torch.load(root/'test.pt', map_location='cpu', weights_only=False)
     if meta.get('storage_format') != 'streaming_memmap_v1':
         raise ValueError('Only streaming_memmap_v1 features are supported')

@@ -12,6 +12,7 @@ import contextlib
 import csv
 import itertools
 import json
+import re
 import shutil
 import sqlite3
 from collections import Counter
@@ -50,6 +51,12 @@ def load_source(args):
     if not args.library_id.strip() or any(c in args.library_id for c in '\t\r\n'):
         raise ValueError('Invalid native library ID')
     root, out = args.input_dir.resolve(), args.out_dir.resolve()
+    named_version = re.fullmatch(r'(V\d+)-V\d+', root.name, flags=re.IGNORECASE)
+    if named_version and named_version.group(1).upper() != args.version.upper():
+        raise ValueError(
+            f'--version {args.version!r} does not match source cache {root.name!r}; '
+            f'pass --version {named_version.group(1).upper()} '
+            '(VERSION in step1.1_build_native_negatives.sh).')
     if out == root or out in root.parents or root in out.parents:
         raise ValueError('Input and output directories must be separate')
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
@@ -76,7 +83,9 @@ def load_source(args):
         raise ValueError('This step expects native test features; WGA controls must retain their WGA identity')
     architecture = infer_architecture(summary)
     if architecture is None:
-        raise ValueError('Cannot infer source backbone architecture')
+        raise ValueError(f'Cannot infer source backbone architecture from {paths[4]}; '
+                         'restore its model_architecture/model_family and extraction protocol. '
+                         'An empty source_feature_summary can result from cropping before split summaries were merged.')
     with paths[3].open(newline='', encoding='utf-8-sig') as f:
         fields = next(csv.reader(f, delimiter='\t'), [])
     if len(fields) != len(set(fields)) or not REQUIRED.issubset(fields):

@@ -31,9 +31,14 @@ def valid_model_name(value):
 
 def infer_architecture(config):
     explicit = config.get('model_architecture')
-    if explicit in ('diffusion', 'bert', 'gpt'):
+    if explicit in ('diffusion', 'flow_matching', 'bert', 'gpt'):
         return explicit
+    dlm = config.get('dlm_config', {})
+    if isinstance(dlm, dict) and str(dlm.get('model', '')).startswith('flow_matching'):
+        return 'flow_matching'
     names = ' '.join(str(config.get(k, '')) for k in ['model_type', 'model_family', 'architectures']).lower()
+    if 'flow_matching' in names or 'flowmatching' in names:
+        return 'flow_matching'
     if 'diffusion' in names or 'poredlm' in names:
         return 'diffusion'
     if 'bert' in names:
