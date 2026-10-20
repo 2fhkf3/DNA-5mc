@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Same data/output contract and environment controls as Diffusion-kx.sh.
-# GPT preserves its own token layout: mapped codec tokens, no added specials.
+# GPT defaults to [BOS, mapped codec tokens, EOS]; specials are excluded from pooling.
+# SPECIAL_TOKENS=none explicitly restores the previous signal-only layout.
 # Examples:
 #   bash step4_extract_window_hidden_states_GPT.sh
 #   LIMIT=4 DEVICE=cpu OUT_DIR=/tmp/gpt_smoke bash step4_extract_window_hidden_states_GPT.sh
@@ -24,7 +25,7 @@ SELECTED_LAYER_NAME="${SELECTED_LAYER_NAME:-}"
 TOKEN_ID_MODE="${TOKEN_ID_MODE:-auto}"
 TOKENIZER_FILE="${TOKENIZER_FILE:-}"
 TOKEN_OFFSET="${TOKEN_OFFSET:-128}"
-SPECIAL_TOKENS="${SPECIAL_TOKENS:-none}"
+SPECIAL_TOKENS="${SPECIAL_TOKENS:-bos_eos}"
 CODEC_MODE="${CODEC_MODE:-auto}"
 PREPROCESS="${PREPROCESS:-none}"
 WINDOW_SIZE="${WINDOW_SIZE:-15}"
