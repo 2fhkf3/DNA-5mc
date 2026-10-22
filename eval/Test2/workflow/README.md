@@ -6,11 +6,13 @@
 
 | 文件 | 作用 | 是否必须 |
 | --- | --- | --- |
-| `config.yaml` | 四主干路径、文库、策略/seed、阈值、覆盖度、bootstrap 及设备 | 是 |
+| `config.yaml` | 六主干（V011/V013/V543/V548/V554/V610）路径、文库、策略/seed、阈值、覆盖度、bootstrap 及设备 | 是 |
 | `step1_select_native_positives.py/.sh` | 从本主干 test 缓存同步选择 label=1，保留原特征和源行号 | 仅重新推理路线 |
 | `step2_evaluate.py/.sh` | 审计旧预测或调用分类头重新推理；输出全阳性指标与 FN 清单 | 是 |
 | `step3_compare.py/.sh` | 原始集合与共同集合比较、seed 汇总和同 seed 配对差值 | 跨模型比较时 |
 | `common.py/.sh` | 通用 I/O、配置、统计及脚本环境 | 被各步骤调用 |
+| `cache_migration.py` / `cache_migrations/*.json` | 缓存迁移审计、原路径与 NAS 路径映射及冻结签名 | 缓存迁移时 |
+| `test_cache_migration.py` | 临时目录中的迁移回归检查，不读取真实大缓存 | 验证迁移逻辑 |
 | `run_all.sh` | 测试、只读计划、正式运行入口 | 可选 |
 | `test_workflow.py` | `/tmp` 下的 CPU 集成测试，无正式导出 | 验证实现 |
 
@@ -27,6 +29,31 @@ bash /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test2/workflow/run_all.sh --dry-
 ```
 
 解释器优先使用已激活的非 base 环境，其次是本机 PoreDLM；也可设置 `PYTHON_BIN`。依赖为 Python、PyTorch、NumPy、PyYAML 和标准库 SQLite。所有 Bash 入口可在任意工作目录调用。
+
+### 已迁移到 NAS 的原训练缓存
+
+六个模型的 `models.<版本>.feature_dir` 现指向 `/mnt/nas_data/shenhaojie/step5-output/<版本>-V2`。训练 run/config.json 与 best.pt 中的历史路径、签名保持原样。每个模型用 `cache_migration_manifest` 指向独立迁移记录，Step2（包括 `--dry-run`）会校验这些记录。
+
+迁移记录核对全部训练 run 的原始 test 签名、Test1 chr16-native 缓存中归档的原始来源签名及完整 feature_summary，确认当前 NAS 协议与该归档一致，并检查文件大小、缓存形状及分类头维度。记录保存迁移前签名与迁移后路径/大小/mtime，并对当前 test.pt、metadata_test.tsv、标签数组及 feature_summary.json 固定 SHA256。评测时按当前签名缓存哈希验证结果，避免为 15 个分类头重复散列同一份元数据。
+
+历史训练记录没有原文件内容哈希；这些新哈希固定的是迁移审计时的当前文件，不能追溯证明历史字节完全一致。约 20GB/模型的特征数组维持冻结的大小/mtime 校验，不声称已验证其历史字节。复用预测路线仍逐行核对当前元数据、标签数组与原预测，且全量运行核对原 TP/FN 计数。任何未记录的换路径、改协议、缺文件或当前签名变化均报错，不自动放行。
+
+本次六份迁移记录已经生成，正常运行直接执行 Step2。再次移动缓存时，先更新 YAML 中的实际 `feature_dir`，再显式重新审计；无需重新提取主干特征：
+
+```bash
+# 首次为新迁移生成记录；已有记录默认只核验，不覆盖。
+/mnt/zzbnew/rnamodel/zhoukexuan/miniconda3/envs/PoreDLM/bin/python \
+  /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test2/workflow/cache_migration.py
+
+# 再次迁移后重建指定模型记录；不会修改 NAS 或训练结果。
+/mnt/zzbnew/rnamodel/zhoukexuan/miniconda3/envs/PoreDLM/bin/python \
+  /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test2/workflow/cache_migration.py --version V543 --refresh
+
+# 迁移逻辑的临时目录回归检查。
+python /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test2/workflow/test_cache_migration.py
+```
+
+2026-10-20 迁移验证：10 项迁移回归检查全部通过；真实配置的只读计划通过六模型、90 个已完成 run 的迁移绑定校验。另在 `/tmp` 中对每个模型扫描前 128 个源窗口、各筛选出 55 个阳性，核对筛选特征与 NAS 源数组逐值一致；六模型 MLP 及 V011 融合头、Residual DWConv 共八组进行旧预测/CPU 重推理对照，阈值 0.5 的判定完全一致，最大概率绝对差约 2.53×10⁻⁴。临时测试自动清理；这些是小样本联调，没有生成正式全量 Test2 结果。
 
 ## 3. 路线 A：复用预测，推荐
 

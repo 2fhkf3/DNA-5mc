@@ -60,6 +60,8 @@ def load_config(args):
         for key in ('feature_dir', 'runs_root'):
             if not Path(m[key]).is_absolute():
                 raise ValueError(f'models.{v}.{key} must be absolute')
+        if m.get('cache_migration_manifest') and not Path(m['cache_migration_manifest']).is_absolute():
+            raise ValueError(f'models.{v}.cache_migration_manifest must be absolute')
     library = c['library_id']
     if not isinstance(library, str) or not library.strip() or any(x in library for x in '\r\n\t'):
         raise ValueError('Invalid library_id')

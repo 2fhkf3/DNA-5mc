@@ -39,6 +39,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 # Shared performance options live in the existing Test1 common module.
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+from workflow.step4_center_crop import CenterCropWriterMixin
 from eval.Test1.workflow.common import (
     add_extraction_performance_args, validate_extraction_performance,
     extraction_performance_metadata, iter_encoded_signals, pool_hidden_on_model,
@@ -161,7 +162,7 @@ def span_to_token_interval(
     token_end = max(token_start + 1, min(token_end, token_len))
     return token_start, token_end
 
-class StreamingSplitWriter:
+class StreamingSplitWriter(CenterCropWriterMixin):
     """Append one split to bounded RAM buffers and publish it atomically."""
 
     FORMAT = "streaming_memmap_v1"
@@ -175,6 +176,7 @@ class StreamingSplitWriter:
         dtype: str,
         save_every: int,
         feature_source: str,
+        output_window_size: int | None = None,
     ) -> None:
         self.out_dir = out_dir
         self.split = split
@@ -183,6 +185,7 @@ class StreamingSplitWriter:
         self.feature_dtype = np.dtype(dtype)
         self.save_every = save_every
         self.feature_source = feature_source
+        self.initialize_center_crop(window_size, output_window_size)
         dtype_tag = "f16" if self.feature_dtype == np.dtype("float16") else "f32"
 
         self.feature_path = out_dir / f"{split}.features.{dtype_tag}.bin"
@@ -213,7 +216,7 @@ class StreamingSplitWriter:
         )
         self._metadata_writer = csv.DictWriter(
             self._metadata_handle,
-            fieldnames=METADATA_KEYS + ["split"],
+            fieldnames=self.output_metadata_fields(METADATA_KEYS + ["split"]),
             delimiter="\t",
         )
         self._metadata_writer.writeheader()
@@ -230,6 +233,7 @@ class StreamingSplitWriter:
     def append(
         self, feature: np.ndarray, label: int, metadata: dict[str, Any]
     ) -> None:
+        feature, metadata = self.prepare_output(feature, label, metadata)
         expected_shape = (self.window_size, self.hidden_size)
         if feature.shape != expected_shape:
             raise ValueError(
@@ -318,6 +322,7 @@ class StreamingSplitWriter:
             "records": self.records,
             "feature_shape": [self.records, self.window_size, self.hidden_size],
             "feature_source": self.feature_source,
+            **self.center_crop_metadata(),
         }
         manifest.update(extra_manifest or {})
         torch.save(manifest, self.manifest_partial)
@@ -737,7 +742,8 @@ def build_split(split, encoder, decoder, preprocessor, args, device, protocol):
     input_path = split_input_path(args.data_dir, split)
     initial = input_path.stat()
     writer = StreamingSplitWriter(args.out_dir, split, args.window_size, protocol.hidden_size,
-                                  args.dtype, args.save_every, feature_source(args, protocol))
+                                  args.dtype, args.save_every, feature_source(args, protocol),
+                                  output_window_size=getattr(args, "output_window_size", None))
     pending = []
     seen = skipped = overlong = 0
     skipped_reasons = dict(missing_signal=0, missing_spans=0, decoder_context_limit=0)

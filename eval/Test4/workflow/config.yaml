@@ -1,0 +1,88 @@
+# Test4：连续 CpG 甲基化频率与独立 WGBS 的相关性。先 --test，再 --dry-run。
+# 真实运行前填写 reference.build/fasta/coordinate_evidence 及 preprocessing 的证据。
+protocol_id: hg002_chr16_wgbs_correlation_v1
+output_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test4/output/hg002_chr16_wgbs_correlation_v1
+library_id: NATIVE_250F500490011
+chromosome: chr16
+strand: '+'
+inputs:
+  wgbs_bed: /home/shj/ZJ-lab/Modification/DNA-5mc/output/step2_input/bed/HG002_250F500490011.bed.gz
+  signal_jsonl: /mnt/zzbnew/rnamodel/jinyue/data/processed_data/chr16/mod/s2_all_reads.genome_signal.preprocessed.jsonl
+reference:
+  source: independent_wgbs
+  source_evidence: 用户于2026-10-20确认该BED为独立WGBS结果；原始文库和转换流程待补充
+  build: pending_verification
+  fasta: null                      # 必须是与 WGBS 和 BAM 一致的 FASTA，不猜测 hg19/hg38
+  coordinate_system: bed0
+  strand_mode: strand_specific     # 当前仅支持已确认的分链参考；合链参考须先明确转换
+  coordinate_evidence: ''          # BED 导出/坐标转换依据；不是通过最大化相关性选择偏移
+preprocessing:
+  status: pending_audit            # 核对上游日志/原训练同read窗口后改为 training_matched
+  evidence: ''                    # 记录真实算法、配置、代码或逐点回归验证证据
+filters:
+  min_mapq: 60
+  min_wgbs_coverage: 5
+  min_common_reads: 5
+  read_call_threshold: 0.5          # 逐read概率>=0.5计为甲基化；不按Test4调阈值
+  require_query_reference_match: true
+scan:
+  region: null                     # 可设[start0,end0]；仍顺序扫描源文件，区域不改变read质量规则
+  max_records: null                # 前N条完整read，仅限独立allow_partial_results=true联调
+  shard_windows: 4096              # 在完整read边界写分片；一个read的窗口可能略超此值
+  checkpoint_records: 1000         # 即使没有有效窗口也定期提交扫描位置
+  log_every_records: 1000
+runtime:
+  device: cuda:0                   # auto/cpu/cuda:N；Step2以外无需GPU
+  cpu_threads: 4
+  head_batch_size: 2048
+bootstrap:
+  block_size_bp: 1000000
+  repeats: 1000
+  seed: 42
+  minimum_blocks: 20               # 少于此区块数不计算空间CI，保留缺失状态
+plots:
+  enabled: true
+  max_points: 50000                # 仅限制图上点数；指标用全部固定位点，所有run同一显示索引
+enabled_versions: [V011, V013, V543, V548, V554, V610]
+strategies: []                     # 空=五种已完成分类头；可显式选择子集并另设协议
+training_seeds: []                 # 空=全部已完成seed，不根据Test4成绩挑选
+allow_partial_results: false
+# feature_summary用于追溯原分类头特征协议；不读取数十GiB的特征数组。
+# 当前NAS新位置与Test2旧迁移记录不同；本流程直接冻结摘要、模型和classifier的内容哈希。
+models:
+  V011:
+    architecture: diffusion
+    model_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/backbone/V011-Diffusion
+    decoder_subdir: hf_dlm_elf_mixed_with_cls_token_step65000-unsharded
+    feature_summary: /mnt/nas_data/shenhaojie/Modfication/train/step5-output/V011-V2/feature_summary.json
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V011-v2
+  V013:
+    architecture: flow_matching
+    model_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/backbone/V013-Flow-matching
+    decoder_subdir: hf_dlm_step10000
+    feature_summary: /mnt/nas_data/shenhaojie/Modfication/train/step5-output/V013-V2/feature_summary.json
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V013-v2
+  V543:
+    architecture: bert
+    model_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/backbone/V543-BERT
+    decoder_subdir: base
+    feature_summary: /mnt/nas_data/shenhaojie/Modfication/train/step5-output/V543-V2/feature_summary.json
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V543-v2
+  V548:
+    architecture: bert
+    model_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/backbone/V548-BERT
+    decoder_subdir: base
+    feature_summary: /mnt/nas_data/shenhaojie/Modfication/train/step5-output/V548-V2/feature_summary.json
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V548-v2
+  V554:
+    architecture: bert
+    model_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/backbone/V554-BERT
+    decoder_subdir: base
+    feature_summary: /mnt/nas_data/shenhaojie/Modfication/train/step5-output/V554-V2/feature_summary.json
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V554-v2
+  V610:
+    architecture: gpt
+    model_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/backbone/V610-GPT
+    decoder_subdir: base
+    feature_summary: /mnt/nas_data/shenhaojie/Modfication/train/step5-output/V610-V2/feature_summary.json
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V610-v2

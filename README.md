@@ -10,8 +10,8 @@
 训练与常规测试
 比对 JSONL + bedMethyl
   → 信号预处理 → 带标签窗口 → 类别平衡 / 筛选
-  → encoder + BERT / Diffusion / GPT → [N, 15, H] 特征
-  → 中心裁剪，例如 [N, 5, H] → 分类头训练 → read/window 与 site 指标
+  → encoder + BERT / Diffusion / Flow Matching / GPT（完整15碱基上下文）
+  → Step4直接保存中心特征，例如 [N, 5, H] → 分类头训练 → read/window 与 site 指标
 
 Test1：假阳性
 已预处理的 WGA UNMOD JSONL
@@ -152,6 +152,8 @@ extraction:
   out_dir: null                      # 可直接指定完整的新输出目录
   device: cuda:0
   dtype: float16                     # 特征落盘精度
+  window_size: 15                    # 模型使用完整输入窗口
+  output_window_size: 5              # 直接输出中心5碱基，不需要再执行Step5
   limit: null                        # 正式运行保持 null；测试可设 17
 ```
 
@@ -170,7 +172,7 @@ MODEL=V548 LIMIT=17 OUT_DIR=/path/to/new/V548_smoke \
 MODEL=V548 bash workflow/step4_extract_features.sh
 ```
 
-设置 `MODEL=V011`、`MODEL=V013` 或 `MODEL=V610` 即可切换架构；`VERSION` 也是模型选择别名，同时设置时 `MODEL` 优先。只处理测试集可设 `SPLITS=test`，但训练版 Step5 和分类训练要求三个 split 齐全。
+设置 `MODEL=V011`、`MODEL=V013` 或 `MODEL=V610` 即可切换架构；`VERSION` 也是模型选择别名，同时设置时 `MODEL` 优先。只处理测试集可设 `SPLITS=test`，仍可直接裁剪；自动生成训练配置和分类训练要求三个 split 齐全。
 
 V013 使用 `architecture: flow_matching`。默认 `hidden_source: ode_hidden`、`ode_steps: 2`、`ode_start_t: 0.98`、自条件 CFG 为 0.5，沿用模型 readme 的编码示例；这些参数尚未为 5mC 调优。新增的 [Flow 提取器](workflow/step4_extract_window_hidden_states_Flow-matching.py) 在项目内兼容导出包的 `hf_auto/porebert` 加载分支，严格加载全部 context/Flow 权重并调用 checkpoint 原有 ODE 实现。保留 context 的 `padding_idx=0`，批量补齐使用 tokenizer 的 pad=1，实际屏蔽由长度 mask 决定。原始模型目录不作修改。
 
@@ -185,7 +187,7 @@ DATA_DIR=/path/to/window_splits OUT_DIR=/path/to/new/V013_standalone \
   bash workflow/step4_extract_window_hidden_states_Flow-matching.sh
 ```
 
-`context_hidden`、`ode_hidden` 和 `last_hidden` 是不同的特征协议；改变输出类型、ODE 参数或预处理方式时应使用新的输出目录，并重新训练对应分类头。V013 输出沿用 `[N, window_size, 768]` 的 `streaming_memmap_v1`，可继续进入 Step5。CPU 集成检查入口为 `workflow/test_step4_flow_matching.py`，使用本地 V013 权重，测试输出全部放在临时目录。
+`context_hidden`、`ode_hidden` 和 `last_hidden` 是不同的特征协议；改变输出类型、ODE 参数或预处理方式时应使用新的输出目录，并重新训练对应分类头。V013 输出沿用 `streaming_memmap_v1`，统一入口的形状为 `[N, output_window_size, 768]`。CPU 集成检查入口为 `workflow/test_step4_flow_matching.py`，使用本地 V013 权重，测试输出全部放在临时目录。
 
 直接调用 Python 时，显式传入当前配置路径：
 
@@ -194,11 +196,65 @@ DATA_DIR=/path/to/window_splits OUT_DIR=/path/to/new/V013_standalone \
   --config workflow/config/step4_config.yaml --model V548 --print-plan
 ```
 
-输出目录必须是新目录。统一入口加载一次模型，依次处理各 split，全部成功后发布结果；同时保存实际配置和输入签名。运行中编辑 YAML 只影响后续任务，输入窗口或模型配置变化仍会报错。`limit` 非空时，汇总记录 `partial_extraction: true`。
+输出目录必须是新目录。统一入口在每个设备上加载一次模型，同设备的split依次处理，不同设备并行，全部成功后发布结果；同时保存实际配置和输入签名。运行中编辑 YAML 只影响后续任务，输入窗口或模型配置变化仍会报错。`limit` 非空时，汇总记录 `partial_extraction: true`。
+
+### Step4 按 split 分配 GPU
+
+当前 [step4_config.yaml](workflow/config/step4_config.yaml) 默认配置为：
+
+```yaml
+extraction:
+  device: cuda:0
+  split_devices:
+    train: cuda:0
+    valid: cuda:1
+    test: cuda:1
+```
+
+运行 `bash workflow/step4_extract_features.sh` 会启动两个独立进程：GPU0处理train，GPU1依次处理valid和test。每张卡各加载一份codec和主干，GPU1在valid结束后复用模型处理test。`cpu_threads` 是每个进程的线程数，两进程各8线程时共可使用16线程。数据集名称使用 `valid`，对应 `valid.jsonl[.gz]`。
+
+所有split继续写入同一个临时输出目录，全部成功才发布完整目录、合并摘要及训练配置。任一进程失败会取消其他进程；已完成token缓存仍可复用，特征输出仍按完整任务重建。`feature_summary.json` 记录每个split的设备、设备分组和各split的token缓存协议；不同GPU型号允许有独立缓存指纹，其他特征协议必须一致。
+
+```bash
+# 只预览分组，不加载权重、不启动GPU任务。
+DRY_RUN=1 bash workflow/step4_extract_features.sh
+
+# 临时更换分配。
+SPLIT_DEVICES="train=cuda:1 valid=cuda:0 test=cuda:0" bash workflow/step4_extract_features.sh
+
+# 强制所有选中split在单卡顺序处理。
+DEVICE=cuda:1 bash workflow/step4_extract_features.sh
+```
+
+`split_devices: null` 或CLI `--split-devices off` 关闭按split分配。显式 `DEVICE`/`--device` 会关闭YAML中的分配；同时显式指定 `SPLIT_DEVICES`/`--split-devices` 时按该分配执行。只处理 `SPLITS=test` 时仅加载GPU1上的一份模型。设备编号按进程看到的CUDA编号解释，受 `CUDA_VISIBLE_DEVICES` 影响。
+
+调度测试：`python workflow/test_step4_devices.py`，使用CPU模拟工作进程验证真实spawn并发、同设备split分组、失败取消、原子发布、摘要兼容性及参数覆盖；不需要GPU或模型权重。
+
+2026-10-22：包含原有中心裁剪、精度及缓存测试在内共50项CPU测试通过。当前V013的实际启动预览确认train→cuda:0、valid/test→cuda:1；未执行双GPU全量提取。配置引用的Self-Flow训练模板已补齐，训练参数沿用 `train/run/V013-V2/config.yaml`。
 
 ### 中心裁剪与训练
 
-下面使用已有的完整 Step4 特征，生成中心 5-mer 缓存及对应训练配置。裁剪保留 Step4 的上下文信息，只截取隐藏状态的位置，不重新运行主干模型。
+统一 Step4 已包含中心裁剪。在 [step4_config.yaml](workflow/config/step4_config.yaml) 设置 `window_size: 15`、`output_window_size: 5`，模型仍编码完整15碱基信号，聚合后只保存中心5碱基的特征。输出为 `[N,5,H]`，不会先写出15碱基特征再读取裁剪；特征二进制体积约为完整15碱基输出的三分之一。这减少写盘和后续读取，不减少主干前向计算。
+
+`output_window_size` 支持5、7、9等不超过输入窗口的奇数；设为 `null` 或与 `window_size` 相同则保留完整窗口。环境变量为 `OUTPUT_WINDOW_SIZE`，CLI为 `--output-window-size`。`seq/ref` 使用相同中心切片；原始序列、裁剪偏移和原始特征形状保存在元数据及manifest中，基因组/信号坐标保留原值。
+
+```bash
+# 一步提取并裁剪；指定一个尚不存在的输出目录。
+MODEL=V013 DEVICE=cuda:1 OUTPUT_WINDOW_SIZE=5 \
+OUT_DIR=/path/to/new/V013_self_flow_center5 \
+bash workflow/step4_extract_features.sh
+
+# 三个split齐全时，直接使用输出中的训练配置。
+bash train/run/example/run.sh /path/to/new/V013_self_flow_center5/train_config.yaml
+```
+
+配置 `train_config` 指定训练模板（默认 `train/run/example/config.yaml`），生成输出目录中的 `train_config.yaml`，保留模板训练参数并更新数据目录、实验名、融合窗口；设为 `null` 可关闭生成。`experiment` 为可选实验名，默认 `<输出目录名>_center<输出长度>`；也可用 `TRAIN_CONFIG`、`EXPERIMENT` 或同名CLI覆盖。模板在启动时读取，生成配置不会修改模板或自动启动训练。只选择部分split时不生成训练配置。token缓存仍绑定原始输入窗口，切换输出长度可复用同协议token缓存；每次使用新的特征输出目录。
+
+CPU回归检查：`python workflow/test_step4_center_crop.py`，比较四类后端的直接输出与原Step5裁剪结果，包括特征、标签、元数据、配置生成和发布失败处理，不加载模型权重。
+
+2026-10-22：中心裁剪、精度控制及token缓存共42项CPU测试通过；5/7碱基、FP16/FP32落盘结果与独立Step5逐字节一致。统一入口另用模拟数值前向验证完整15碱基上下文及5碱基输出协议，未运行全量GPU提取。
+
+下面的独立 Step5 保留供已有的完整 Step4 特征使用；通过统一入口生成目标长度后无需再执行。
 
 双卡按 split 提取后，应合并各任务的摘要为 `feature_summary.json`。若该摘要缺失，Step5 会核对三个 `.pt` 中记录的主干协议并恢复到裁剪摘要，保留模型路径、隐藏状态、ODE 和 token 参数；协议不一致或缺少可恢复信息时会报错。
 
@@ -252,14 +308,78 @@ WANDB_MODE=offline "$PYTHON_BIN" train/train.py --config "$CROP_DIR/train_config
 | Diffusion `hidden_source` | `ode_hidden`、`context_hidden`、`last_hidden` 等；V011 默认 ODE 起点 0.97、1 步、CFG 0.5 |
 | GPT `decoder_layers` | `last`、`embed` 或从 0 开始的 Transformer 层编号；多选时还需明确 `selected_layer_name` |
 | `batch_size` | 主干推理批次；当前统一配置中 BERT 为 8，Diffusion/GPT 为 32，模型条目可覆盖 |
-| `dtype` | 仅控制缓存落盘精度，不将主干推理自动切换为 FP16 |
+| `dtype` | 特征落盘精度，与主干推理精度独立 |
+| `inference_precision` | 统一 YAML 默认 `fp16`：CUDA 主干 FP16 autocast；`fp32` 恢复 FP32；CPU 使用 FP32并记录实际精度 |
 | `pooling_device` | `model` 在模型设备上按原 span 做 FP32 聚合后传回 CPU；`cpu` 保留原 CPU 聚合 |
-| `codec_batch_size` | 默认 1，逐条编码；大于 1 时按等长信号批量编码 |
-| `codec_buffer_size` | 等长分组缓冲窗口数，只在批量 codec 启用时使用 |
+| `codec_batch_size` | 统一 YAML 默认 128；按精确信号长度分组批量编码；1 为逐条编码 |
+| `codec_buffer_size` | 统一 YAML 默认 8192；一个缓存分片最多包含这么多个有效窗口 |
+| `codec_max_samples` | 统一入口默认 524288；按采样点数限制单个 codec 批次，超预算的单条窗口独立处理 |
+| `token_cache_mode` | 统一 YAML 默认 `readwrite`；`readonly` 只复用，缺片报错；`off` 不读写 token 缓存 |
+| `token_cache_dir` | 默认 `output/step4_token_cache`，相对项目根目录；可配置到容量足够的 SSD/NAS |
 
 不同主干的 token 映射、特殊 token 和隐藏层语义不同，应保持与对应训练特征一致。改变这些参数后，需要使用匹配的特征重新训练分类头。
 
-GPU 聚合会因求和顺序产生微小浮点差异；批量 codec 的卷积舍入差异可能进一步改变离散 token，已有真实小样本测试观察到该现象，因此正式对比默认保留 `codec_batch_size: 1`。当前实现未通过额外降低主干精度来提速。
+GPU 聚合会因求和顺序产生微小浮点差异；批量 codec 的卷积舍入差异可能进一步改变离散 token，已有真实小样本测试观察到该现象。2026-10-22 起统一 YAML 默认启用批量 codec、持久化 token 缓存和 CUDA 主干 FP16 autocast；训练/评测需采用匹配的提取协议。
+
+### Step4 等长批量编码与 token 缓存
+
+统一入口 `workflow/step4_extract_features.sh` 支持 BERT、Diffusion、Flow Matching 和 GPT。每次缓冲有效窗口，按信号采样点数精确分组，不补零；按 `codec_batch_size` 与 `codec_max_samples` 切分批次，完成后恢复输入顺序。保存原始 codec ID，主干自己的 token 映射、特殊 token 和 span 池化仍由原提取器处理。
+
+默认先生成或复用 token 分片，再将其交给现有主干推理。缓存命中时跳过 codec 前向；仍需读取原 JSONL，校验信号、span、样本身份及顺序。缓存绑定编码器权重/配置/代码内容、输入路径与大小/mtime、预处理、轨道、codec 批次/缓冲区/采样预算、运行精度和设备环境；主干版本名、隐藏层、ODE 设置不直接参与 raw token 缓存键。编码器内容和编码协议完全相同的模型可复用，decoder 特征仍分别提取。
+
+```bash
+# 只读预览，不加载模型或写缓存。
+MODEL=V554 DRY_RUN=1 bash workflow/step4_extract_features.sh
+
+# 新一轮完整提取，GPU1；使用新的特征输出目录。
+MODEL=V554 DEVICE=cuda:1 \
+OUT_DIR=/mnt/nas_data/shenhaojie/Modfication/train/step4-output_dir/V554_codec128_v1 \
+bash workflow/step4_extract_features.sh
+
+# 恢复逐条 codec 的原数值路径，配合新的输出目录使用。
+CODEC_BATCH_SIZE=1 TOKEN_CACHE_MODE=off \
+OUT_DIR=/mnt/nas_data/shenhaojie/Modfication/train/step4-output_dir/V554_serial_v1 \
+MODEL=V554 bash workflow/step4_extract_features.sh
+```
+
+上面的逐条编码示例只恢复 codec 路径；如需整个提取恢复 FP32主干，另设置 `INFERENCE_PRECISION=fp32`。
+
+`TOKEN_CACHE_DIR`、`TOKEN_CACHE_MODE`、`CODEC_MAX_SAMPLES` 可通过环境变量或同名 CLI（下划线改连字符）覆盖。只读复用需要与生成缓存时相同的输入、limit、codec 批次和运行协议；例如 CPU 生成的缓存与 CUDA 生成的缓存分开存放。
+
+缓存目录为 `<token_cache_dir>/<协议指纹>/<split>/part_*/`，每片包含 `tokens.npz` 和 `manifest.json`。tokens 以 uint16 或 int32 紧凑保存，保留原始行号和变长 offset；SHA256 校验内容。分片原子发布并使用进程锁；中断后已完成 token 分片可复用，未完成片重新编码。**特征文件仍按现有规则完整重建，不是 embedding 分片续跑；已有特征目录继续拒绝覆盖。**
+
+`feature_summary.json` 保存缓存协议，每个 split 的 `token_cache` 记录 `rows_encoded`、`rows_from_cache`、codec 批次数、OOM 拆批及缓存分片清单。命中时日志显示 `cached=...`、`batches=0`；出现哈希或身份不匹配会拒绝该缓存。可删除确认不再需要的相应缓存协议目录后重建，保留其他实验的缓存。
+
+CPU 回归测试（仅 `/tmp` 合成数据，不加载真实大模型）：
+
+```bash
+"${PYTHON_BIN:-/mnt/zzbnew/rnamodel/zhoukexuan/miniconda3/envs/PoreDLM/bin/python}" \
+  workflow/test_step4_token_cache.py
+```
+
+2026-10-22 验证：22 项 CPU 测试通过，包含顺序/尾片、采样预算、缓存命中、只读模式、分片中断恢复、输入/权重/协议变化、缓存损坏、模拟 CUDA OOM 拆批、输出/缓存目录冲突和 Shell 参数优先级。另外使用八条真实窗口信号重复构成 32 条输入，分别通过 V554/V610/V011/V013 的真实 CPU 编码器和主干；不缓存、首次缓存、只读复用三种模式的 `[32,15,768]` FP32 特征、标签和元数据逐字节一致，复用时 codec 前向次数为 0。另用 V554 真实编码器核对了原等长批量 helper 与新缓存中的 raw token，32/32 条逐元素相同。这些是接口及一致性验证，尚未测试全量数据或 GPU 吞吐倍率。
+
+### Step4 主干 FP16 autocast
+
+统一入口新增 `inference_precision: fp16`，对应 CLI `--inference-precision fp16` 和环境变量 `INFERENCE_PRECISION=fp16`。四类主干均在原推理函数上启用 CUDA autocast，保持权重 FP32；codec 执行在 autocast 之外，逐碱基池化显式关闭 autocast 并使用 FP32。信号长度、特殊 token、mask、ODE 配置和输出顺序继续沿用所选模型协议，现有 OOM 拆批逻辑继续使用。
+
+```bash
+# 当前 V013 Self-Flow 使用 FP16 autocast；指定新的特征输出目录。
+MODEL=V013 DEVICE=cuda:1 INFERENCE_PRECISION=fp16 \
+OUT_DIR=/mnt/nas_data/shenhaojie/Modfication/train/step4-output_dir/V013_self_flow_amp_v1 \
+bash workflow/step4_extract_features.sh
+
+# 对照用FP32主干；可以复用同协议的raw token缓存，特征另存。
+MODEL=V013 DEVICE=cuda:1 INFERENCE_PRECISION=fp32 \
+OUT_DIR=/mnt/nas_data/shenhaojie/Modfication/train/step4-output_dir/V013_self_flow_fp32_v1 \
+bash workflow/step4_extract_features.sh
+```
+
+CPU 上请求 fp16 时实际使用 fp32，日志会显示 requested/effective 精度。`feature_summary.json`、各 split 记录和 `.pt` manifest 均保存实际 `inference_precision`、`requested_inference_precision`、`inference_dtype`、codec/池化精度。`dtype` 仍单独控制落盘精度，例如可以用 FP16 autocast计算、FP32落盘来检查误差。主干精度不参与 raw token 缓存键；只切换主干精度时可复用 token。
+
+FP16 autocast 会产生数值差异，应在独立输出目录生成匹配的新特征。遇到非有限特征时，现有校验会终止提取，避免把混合的隐式回退结果发布成同一精度协议；可显式改用 `INFERENCE_PRECISION=fp32` 重跑。已启动的进程不会自动读取新设置。
+
+精度边界测试：`python workflow/test_step4_precision.py`。测试覆盖四类主干函数绑定、codec不进入autocast、FP32池化、CPU回落、异常/OOM恢复及实际精度写入manifest。使用CPU BF16算子模拟autocast作用域，不能作为CUDA FP16数值精度或提速倍率的验证；当前会话没有可用GPU，GPU实测尚未完成。
 
 原 [BERT](workflow/step4_extract_window_hidden_states_BERT-js.sh)、[Diffusion](workflow/step4_extract_window_hidden_states_Diffusion-kx.sh)、[GPT](workflow/step4_extract_window_hidden_states_GPT.sh) 入口仍可使用，其默认输出路径、批次和 dtype 与统一入口可能不同。
 
@@ -384,7 +504,8 @@ W&B 由 [wandb_tracking.py](train/wandb_tracking.py) 管理，每个分类头/se
 ├── metadata_train.tsv                  # 每行对应一个窗口
 ├── ...
 ├── feature_summary.json
-└── resolved_extraction_config.json     # 统一入口实际使用的配置
+├── resolved_extraction_config.json     # 统一入口实际使用的配置
+└── train_config.yaml                   # 配置模板且三个split齐全时生成
 ```
 
 特征形状为 `[N, W, H]`：窗口数、碱基位置数、隐藏维度。移动缓存时应整体保留 `.pt`、`.bin` 和 TSV；仅复制 `.pt` 无法训练。`.partial` 文件不是已完成结果。

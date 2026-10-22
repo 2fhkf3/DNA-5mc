@@ -22,6 +22,12 @@ spec.loader.exec_module(_io)
 for name in ('read_json','write_json','signature','sha256','output_directory','open_text','tsv','readonly_db','infer_architecture'):
     globals()[name] = getattr(_io,name)
 
+_migration_path = PROJECT/'eval/Test2/workflow/cache_migration.py'
+_migration_spec = importlib.util.spec_from_file_location('_test3_cache_migration', _migration_path)
+_migration = importlib.util.module_from_spec(_migration_spec)
+_migration_spec.loader.exec_module(_migration)
+audit_cache_binding = _migration.audit_binding
+
 KEYS = ['library_id','read_id','chrom','position','strand']
 SITE = ['library_id','chrom','position','strand']
 META = ['read_id','chrom','center_genome_pos0','strand','source','label','seq','ref']
@@ -63,6 +69,8 @@ def load_config(args):
             raise ValueError(f'Invalid/unconfigured model: {v}')
         for field in ('feature_dir','runs_root'):
             if not Path(c['models'][v][field]).is_absolute(): raise ValueError('Model paths must be absolute')
+        if c['models'][v].get('cache_migration_manifest') and not Path(c['models'][v]['cache_migration_manifest']).is_absolute():
+            raise ValueError('Cache migration manifest path must be absolute')
     depths=c['depths']
     if not depths or any(type(d) is not int or d<1 for d in depths) or depths!=sorted(set(depths)):
         raise ValueError('depths must be increasing unique positive integers')
@@ -124,7 +132,9 @@ def unchanged(snapshots):
 
 
 def code_hashes():
-    return {p.name:sha256(p) for p in sorted(Path(__file__).parent.glob('*.py'))}
+    result = {p.name:sha256(p) for p in sorted(Path(__file__).parent.glob('*.py'))}
+    result['Test2/cache_migration.py'] = sha256(_migration_path)
+    return result
 
 
 def read_tsv(path,required=()):
@@ -150,7 +160,8 @@ def discover(c):
             if any(m.get(k)!=cfg.get(k) for k in ('strategy','seed','fingerprint')): raise ValueError('Run/config identity mismatch')
             if not re.fullmatch(re.escape(v)+r'(?:[-_].*)?',cfg['experiment'],re.I): raise ValueError('Run version mismatch')
             if file.parent.name!=f'{m["strategy"]}_seed{m["seed"]}': raise ValueError('Noncanonical run name')
-            if Path(cfg['feature_dir']).resolve()!=Path(c['models'][v]['feature_dir']).resolve(): raise ValueError('Run uses another feature cache')
+            if Path(cfg['feature_dir']).resolve()!=Path(c['models'][v]['feature_dir']).resolve():
+                audit_cache_binding(c,v,cfg,verify_content=False)
             for name in ['best.pt',*(['test_predictions.tsv'] if c['prediction_source']=='saved' else [])]:
                 if not (file.parent/name).is_file(): raise FileNotFoundError(file.parent/name)
             selected.append(dict(version=v,strategy=m['strategy'],training_seed=m['seed'],

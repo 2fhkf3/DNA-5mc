@@ -33,7 +33,11 @@ bash /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test3/workflow/run_all.sh --dry-
 
 ## 3. 正式运行
 
-先修改 [config.yaml](config.yaml)。默认模型为V011/V543/V554/V610，各模型下全部已完成分类头和seed；默认5/10/20、50次重复、共同coverage≥20。
+先修改 [config.yaml](config.yaml)。默认模型为V011/V013/V543/V548/V554/V610（六主干、五分类头，共90个已完成run），各模型下全部已完成分类头和seed；默认5/10/20、50次重复、共同coverage≥20。
+
+当前协议为 `chr16_common_cov20_6models_v1`，结果输出到 `eval/Test3/output/chr16_common_cov20_6models_v1`，与原四主干协议分开。六个 `feature_dir` 均指向 NAS 的 `/mnt/nas_data/shenhaojie/step5-output/Vxxx-V2`，读取原始完整正负 test，不读取 Test1/Test2 的筛选子集。
+
+各模型的 `cache_migration_manifest` 复用 Test2 已生成的迁移记录。发现运行和只读计划时核对原训练签名、归档来源协议、迁移后签名、header/summary 哈希及缓存形状；完整标签和元数据哈希在正式逐 run 审计时核对，并按文件签名缓存验证结果，避免只读计划反复扫描 NAS 大文件。原训练路径与签名均保留，逐行预测核对照常执行。原始特征大数组使用冻结大小/mtime 校验，历史记录没有内容哈希，不能追溯证明历史字节一致。迁移记录的生成/更新方法见 [Test2 迁移说明](../../Test2/workflow/README.md)。每个 run 的清单会记录具体迁移绑定，来源变动检查也包含迁移记录和归档文件。
 
 ```bash
 bash /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test3/workflow/run_all.sh --run
@@ -189,6 +193,8 @@ bash /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test3/workflow/step4_evaluate_co
 自动测试构造具有19、20、21等不同read数的位点，覆盖5/10/20真实无放回抽样、不同训练seed、跨主干缺失read、严格平衡、旧预测与CPU推理一致、阈值等号、并列分数、区块计数汇总、缺失/非法/重复输入、配置冻结、文件损坏与拒绝覆盖，并交叉核对scikit-learn指标及图形导出。
 
 2026-10-18 已通过18项CPU自动测试、Python/Bash语法及默认四主干60个run的只读计划检查。另对V011/V543/V554/V610各自MLP seed1的真实test前128行完成五步接口联调，共同集合为128个位点（73阴性、55阳性）；该前缀每site仅1条read，因此使用独立临时配置的1 read/site，不能视为真实数据5/10/20性能验证。5/10/20及coverage不足排除由有充足read的可控测试样本验证。所有测试均在临时目录，正式output中没有生成评测文件。
+
+2026-10-20 已适配六主干与 NAS 缓存迁移：23 项完整工作流自动测试通过，另新增的“计划延后大文件哈希、正式审计仍拒绝内容变动”检查通过，共 24 项；真实六模型、90 个 run 的五步只读计划通过。计划阶段检查迁移映射、签名、协议及维度，完整元数据/标签哈希保留在正式审计阶段。本次未生成正式全量 Test3 结果。
 
 单步Step1支持：
 

@@ -138,9 +138,8 @@ def audit_run(c,item,version_dir,output,source):
     for k in ('strategy','seed','fingerprint','model','training','feature_dir','source_window_size','hidden_dim','base_source','fusion_window_size'):
         if cfg.get(k)!=checkpoint['config'].get(k): raise ValueError(f'Checkpoint/config mismatch: {k}')
     if checkpoint['epoch']!=old['best_epoch']: raise ValueError('Checkpoint epoch differs')
-    actual={s['path']:s for s in source['source_signatures']}
-    for signed in cfg.get('input_signature',{}).get('test',[]):
-        if actual.get(signed['path'])!=signed: raise ValueError('Original feature signature differs from training')
+    binding=audit_cache_binding(c,item['version'],cfg)
+    before.extend(binding['audit_inputs'])
     stop=source['records']; width=source['width']
     probs=np.lib.format.open_memmap(output/'probabilities.npy',mode='w+',dtype='float64',shape=(stop,))
     db=readonly_db(version_dir/'observations.sqlite'); db.row_factory=sqlite3.Row
@@ -179,6 +178,7 @@ def audit_run(c,item,version_dir,output,source):
         input_signatures=before,n_records=stop,partial_test=source['partial_test'],original_counts_verified=verified,
         original_read_confusion=read_counts.tolist(),original_site_confusion=site_counts.tolist(),
         probability_source=c['prediction_source'],historical_prediction_binding='consistency_checks_only' if c['prediction_source']=='saved' else 'loaded_checkpoint_sha256')
+    result['cache_binding']=binding
     write_json(output/'run_manifest.json',result)
     print(f'[DONE] audited {item["version"]}/{item["run_name"]}: {stop} windows',flush=True)
     return result
@@ -188,7 +188,17 @@ def run(c,root,maximum=None,dry_run=False):
     if maximum is not None and maximum<1: raise ValueError('max-records must be positive')
     inventory=discover(c)
     if dry_run:
-        print(json.dumps(dict(output_dir=str(root),source=c['prediction_source'],n_runs=len(inventory),max_records=maximum,runs=inventory),indent=2)); return
+        caches={}
+        for v in c['enabled_versions']:
+            item=next(r for r in inventory if r['version']==v)
+            cfg=read_json(Path(item['run_dir'])/'config.json')
+            binding=audit_cache_binding(c,v,cfg,verify_content=False)
+            meta,_,_,_=source_cache(c,v)
+            caches[v]=dict(feature_dir=binding['feature_dir'],training_feature_dir=binding['training_feature_dir'],
+                           relocated=binding['relocated'],source_shape=meta['feature_shape'],
+                           content_hashes='header/summary checked; full metadata/labels deferred to formal audit')
+        print(json.dumps(dict(output_dir=str(root),source=c['prediction_source'],n_runs=len(inventory),max_records=maximum,
+                              feature_caches=caches,runs=inventory),indent=2)); return
     with output_directory(root) as stage:
         (stage/'manifests').mkdir(); versions=stage/'audit/versions'; runs=stage/'audit/runs'
         stage.joinpath('protocol.yaml').write_text(yaml.safe_dump(c,allow_unicode=True,sort_keys=False))

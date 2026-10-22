@@ -1,5 +1,5 @@
 # Test2：天然 chr16 参考阳性漏检评测。所有路径为绝对路径。
-enabled_versions: [V011, V543, V554, V610] # 参与各步骤的模型，可用 --version 临时只选一个
+enabled_versions: [V011, V013, V543, V548, V554, V610] # 与 Test1 的六模型一致；可用 --version 临时只选一个
 library_id: NATIVE_250F500490011          # 同一天然文库跨主干、跨 Test1/Test2 保持一致
 chromosome: chr16                       # 只接受原 test 染色体；当前训练仅覆盖正链
 reference_validation_status: unverified # 原 BED 真值来源尚未独立核实；选择标签不等于实验验证
@@ -33,20 +33,37 @@ comparison:
   allow_partial: false       # 正式比较拒绝 --max-records 或上游限量产生的结果
 
 # 新模型只需新增同结构条目并修改 enabled_versions；各主干使用自身特征，禁止跨主干混用。
+# feature_dir 是当前实际缓存路径；训练原路径仍从 run/config.json 读取，不改写历史记录。
+# cache_migration_manifest 固定经归档协议、原训练签名核对的迁移映射及当前文件签名。
+# 首次迁移/再次移动后运行 cache_migration.py 审计；正常评测只读取并校验这些记录。
 models:
   V011:
     architecture: diffusion
-    feature_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V011-V2
+    feature_dir: /mnt/nas_data/shenhaojie/step5-output/V011-V2
+    cache_migration_manifest: /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test2/workflow/cache_migrations/V011.json
     runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V011-v2
+  V013:
+    architecture: flow_matching
+    feature_dir: /mnt/nas_data/shenhaojie/step5-output/V013-V2
+    cache_migration_manifest: /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test2/workflow/cache_migrations/V013.json
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V013-v2
   V543:
     architecture: bert
-    feature_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V543-V2
+    feature_dir: /mnt/nas_data/shenhaojie/step5-output/V543-V2
+    cache_migration_manifest: /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test2/workflow/cache_migrations/V543.json
     runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V543-v2
+  V548:
+    architecture: bert
+    feature_dir: /mnt/nas_data/shenhaojie/step5-output/V548-V2
+    cache_migration_manifest: /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test2/workflow/cache_migrations/V548.json
+    runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V548-v2
   V554:
     architecture: bert
-    feature_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V554-V2
+    feature_dir: /mnt/nas_data/shenhaojie/step5-output/V554-V2
+    cache_migration_manifest: /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test2/workflow/cache_migrations/V554.json
     runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V554-v2
   V610:
     architecture: gpt
-    feature_dir: /home/shj/ZJ-lab/Modification/DNA-5mC/train/data/V610-V2
+    feature_dir: /mnt/nas_data/shenhaojie/step5-output/V610-V2
+    cache_migration_manifest: /home/shj/ZJ-lab/Modification/DNA-5mC/eval/Test2/workflow/cache_migrations/V610.json
     runs_root: /home/shj/ZJ-lab/Modification/DNA-5mC/train/output/V610-v2

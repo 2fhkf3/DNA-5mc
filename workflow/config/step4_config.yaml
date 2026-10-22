@@ -6,26 +6,37 @@
 # YAML 内的相对路径以 DNA-5mC 项目根目录为基准，不受启动目录影响。
 # CLI/环境变量中的相对路径以启动目录为基准。
 
-model: V548                 # 本次选择 models 中哪个条目；每次只加载一个模型。
+model: V013                 # 本次选择的模型版本；按设备分配时，每张卡各加载一份。
 
 extraction:
   # 填写实际 Step3/筛选后的窗口目录，含以下 splits 对应的 .jsonl.gz 或 .jsonl。
   # 此处沿用原脚本路径约定；当前工作区未发现该目录，正式运行前必须修改。
   data_dir: /home/shj/ZJ-lab/Modification/DNA-5mc/output/step3_output/new
   splits: [train, valid, test]  # 可改成 [test]；不需要 Test1 的 WGA 清单或审计数据库。
-  output_root: /mnt/nas_data/shenhaojie/step4-output_dir  # 默认输出 <output_root>/<模型名>，例如 output/step4_output/V548。
+  output_root: /mnt/nas_data/shenhaojie/Modfication/train/step5-output_dir/V013-self-flow  # 默认输出 <output_root>/<模型名>，例如 output/step4_output/V548。
   out_dir: null             # 非 null 时直接写此目录；已有目录拒绝覆盖，请为新实验指定新路径。
-  device: cuda:0            # auto / cpu / cuda:0 / cuda:1；auto 有 GPU 时选择 cuda:0。
-  cpu_threads: 4            # CPU 算子线程数。
-  batch_size: 8             # 主干推理批次；模型条目可覆盖，OOM 时自动拆小。
-  dtype: float16            # float16 / float32：仅控制特征落盘精度，不修改主干计算精度。
-  window_size: 15           # 输入窗口的碱基位置数；Step5 再裁剪中心 5/7/... 个位置。
+  device: cuda:0            # 未启用split_devices时使用；显式DEVICE/--device可切回单卡。
+  split_devices:           # 每张卡一个进程，两卡并行；同一卡上的split依次处理、复用模型。
+    train: cuda:0
+    valid: cuda:1          # 配置名为valid，对应输入valid.jsonl[.gz]。
+    test: cuda:1
+  cpu_threads: 8            # GPU提取的CPU算子线程试跑起点；更多线程不一定提高吞吐。
+  batch_size: 64             # 主干推理批次；模型条目可覆盖，OOM 时自动拆小。
+  dtype: float16            # 特征落盘精度，与inference_precision分开控制。
+  inference_precision: fp16 # CUDA主干使用FP16 autocast；权重/codec/池化FP32；CPU实际回落FP32。
+  window_size: 15           # 输入窗口碱基数，模型仍使用完整15碱基的信号上下文。
+  output_window_size: 5     # 输出中心碱基数：5/7/9/...，奇数且<=window_size；null保留完整窗口。
+  train_config: train/run/V013-self-flow/config.yaml # 三个split齐全时生成训练配置；null不生成，不自动启动训练。
+  experiment: null          # 生成配置的实验名；null使用输出目录名_center<输出长度>。
   preprocess: none          # 输入已预处理时使用 none；auto 使用 encoder 自带预处理器。
-  save_every: 1024          # 完成多少个窗口后批量写盘，控制 CPU 缓冲区大小。
-  log_every: 1000           # 进度日志间隔；0 禁用常规进度日志。
+  save_every: 4096          # 增大写盘缓冲，减少小批写入；5x768 FP16特征约30MiB/4096条。
+  log_every: 5000           # 降低常规进度日志频率；0 禁用。
   limit: null               # 每个 split 最多读取 N 个窗口，仅小测试使用；正式保持 null。
-  codec_batch_size: 1       # 1 沿用逐条 codec；>1 等长批量编码可能改变量化 token，验证后再启用。
-  codec_buffer_size: 1024   # 仅批量 codec 使用；按精确长度分组，不补零，恢复原始输出顺序。
+  codec_batch_size: 2048     # 等长信号批量codec；1恢复逐条路径。批量卷积可能改变量化token。
+  codec_buffer_size: 8192   # 每片最多8192个有效窗口；等长分组，不补零，恢复原始样本顺序。
+  codec_max_samples: 524288 # 单个codec批次的采样点预算；超预算的单条信号独立处理。
+  token_cache_mode: readwrite # readwrite：复用或生成；readonly：只复用，缺片报错；off：不读写缓存。
+  token_cache_dir: output/step4_token_cache # 相对项目根目录；可设为容量充足的SSD/NAS路径。
   pooling_device: model     # model：在模型设备上 FP32 聚合后传回 CPU；cpu：原 CPU 聚合。
   # 聚合求和顺序不同会产生微小舍入误差。恢复原路径用 pooling_device: cpu。
   # 模型条目优先于 extraction；环境变量和 CLI 可继续覆盖。
@@ -75,14 +86,14 @@ models:
     architecture: flow_matching  # 使用 Flow runtime；与旧 V011 的 diffusion/ELF 分开。
     model_root: train/backbone/V013-Flow-matching  # V013 模型根目录。
     encoder_dir: null           # null 使用 model_root/encoder；可独立覆盖 Codec 路径。
-    decoder_dir: train/backbone/V013-Flow-matching/hf_dlm_step10000  # Flow checkpoint。
+    decoder_dir: train/backbone/V013-Flow-matching/hf_dlm_step_self_flow  # Flow checkpoint。
     encoder_layer: 0            # 单级 FSQ 量化轨道，只支持 0。
     hidden_source: ode_hidden   # ode_hidden / context_hidden / last_hidden / last_hidden_state。
-    ode_steps: 2                # ODE refinement 步数；默认沿用 V013 readme 编码示例。
-    ode_start_t: 0.98           # ODE 起始时间 (0,1]；只有 ode_hidden 使用。
+    ode_steps: 1                # ODE refinement 步数；默认沿用 V013 readme 编码示例。
+    ode_start_t: 0.97           # ODE 起始时间 (0,1]；只有 ode_hidden 使用。
     ode_self_cond_cfg_scale: 0.5 # ODE 自条件 CFG 系数，>=0。
     last_t: 1.0                 # last_hidden 单次前向的时间，(0,1]。
-    batch_size: 4               # 主干推理批次；根据设备容量调整，CUDA OOM 自动拆分。
+    batch_size: 64              # 覆盖全局batch_size；GPU试跑起点32，有余量再试64；OOM自动拆分。
     # 输出默认为 <output_root>/V013；改变 hidden_source/ODE 设置时请使用新的 out_dir。
     # 保留 BERT padding_idx=0，实际补齐用 tokenizer pad=1，并始终显式传入长度 mask。
     # 在项目内严格加载全部 checkpoint 权重，不修改原始模型配置或权重。
@@ -110,3 +121,10 @@ models:
   #   encoder_layer: 0
   #   token_offset: 128
   # 也可分别指定 encoder_dir / decoder_dir，architecture 可用 auto 从 config.json 推断。
+  V557:
+    architecture: bert
+    model_root: train/backbone/V557-BERT
+    encoder_layer: 0
+    hidden_layer: -1
+    token_offset: 128
+    batch_size: 8
